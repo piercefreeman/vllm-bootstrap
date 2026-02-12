@@ -1,6 +1,8 @@
 # vllm-bootstrap
 
-FastAPI control plane for launching and managing vLLM servers with explicit GPU ownership.
+Self contained docker image to treat a remote server (Runpod, GCP, AWS) as a generic endpoint for speeding up batch inference compute. Deploy the docker image to your remote server and dynamically update the model it's serving, get vllm bootstrap status, issue jobs, etc. 
+
+Internally we implement this logic through a FastAPI control plane for launching and managing vLLM servers with explicit GPU ownership.
 
 ## API
 
