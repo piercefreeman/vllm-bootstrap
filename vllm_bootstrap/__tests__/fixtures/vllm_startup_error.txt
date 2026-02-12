@@ -1,0 +1,15 @@
+(APIServer pid=4956) INFO 02-12 16:02:23 [utils.py:325]
+(APIServer pid=4956) INFO 02-12 16:02:23 [utils.py:325]        █     █     █▄   ▄█
+(APIServer pid=4956) INFO 02-12 16:02:23 [utils.py:325]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.15.1
+(APIServer pid=4956) INFO 02-12 16:02:23 [utils.py:325]   █▄█▀ █     █     █     █  model   fake-model
+(APIServer pid=4956) INFO 02-12 16:02:23 [utils.py:325]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=4956) INFO 02-12 16:02:23 [utils.py:325]
+(APIServer pid=4956) INFO 02-12 16:02:23 [utils.py:261] non-default args: {'host': '127.0.0.1', 'port': 19999, 'model': 'fake-model'}
+(APIServer pid=4956) Traceback (most recent call last):
+(APIServer pid=4956)   File "/root/vllm-bootstrap/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 403, in hf_raise_for_status
+(APIServer pid=4956)     response.raise_for_status()
+(APIServer pid=4956)   File "/root/vllm-bootstrap/.venv/lib/python3.12/site-packages/requests/models.py", line 1026, in raise_for_status
+(APIServer pid=4956)     raise HTTPError(http_error_msg, response=self)
+(APIServer pid=4956) requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/fake-model/resolve/main/config.json
+(APIServer pid=4956) OSError: fake-model is not a local folder and is not a valid model identifier listed on 'https://huggingface.co/models'
+(APIServer pid=4956) If this is a private repository, make sure to pass a token having permission to this repo either by logging in with `hf auth login` or by passing `token=<your_token>`

@@ -95,12 +95,15 @@ class VLLMEnvironmentManager:
     def launch(
         self,
         *,
-        model: str | None,
+        model: str,
         gpu_ids: Sequence[int] | None,
         port: int | None,
         extra_args: Sequence[str],
     ) -> LaunchSnapshot:
-        selected_model = model or self._settings.default_model
+        selected_model = model.strip()
+        if not selected_model:
+            raise LaunchValidationError("model must be provided")
+
         with self._lock:
             available_gpu_ids = self._discover_gpu_ids()
             selected_gpu_ids = self._resolve_gpu_ids(available_gpu_ids, gpu_ids)
@@ -392,10 +395,6 @@ class VLLMEnvironmentManager:
                 self._gpu_owners.pop(gpu_id, None)
 
     def _discover_gpu_ids(self) -> list[int]:
-        gpu_override = os.getenv("VLLM_GPU_INDICES")
-        if gpu_override:
-            return self._parse_gpu_ids(gpu_override, source="VLLM_GPU_INDICES")
-
         cuda_visible_devices = os.getenv("CUDA_VISIBLE_DEVICES")
         if cuda_visible_devices and cuda_visible_devices.lower() != "all":
             return self._parse_gpu_ids(
@@ -410,7 +409,7 @@ class VLLMEnvironmentManager:
             )
         except FileNotFoundError as error:
             raise LaunchValidationError(
-                "Could not discover GPUs. Set VLLM_GPU_INDICES explicitly when nvidia-smi is unavailable."
+                "Could not discover GPUs from connected host hardware because nvidia-smi is unavailable."
             ) from error
         except subprocess.CalledProcessError as error:
             raise LaunchValidationError(

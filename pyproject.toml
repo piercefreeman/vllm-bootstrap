@@ -27,4 +27,4 @@ build-backend = "hatchling.build"
 packages = ["vllm_bootstrap"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["vllm_bootstrap/__tests__"]

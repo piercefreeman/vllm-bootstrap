@@ -44,14 +44,13 @@ def _to_http_error(error: LaunchManagerError) -> HTTPException:
 
 
 @app.post("/launch", response_model=LaunchResponse, status_code=201)
-def launch(request: LaunchRequest | None = None) -> LaunchResponse:
-    launch_request = request or LaunchRequest()
+def launch(request: LaunchRequest) -> LaunchResponse:
     try:
         snapshot = manager.launch(
-            model=launch_request.model,
-            gpu_ids=launch_request.gpu_ids,
-            port=launch_request.port,
-            extra_args=launch_request.extra_args,
+            model=request.model,
+            gpu_ids=request.gpu_ids,
+            port=request.port,
+            extra_args=request.extra_args,
         )
     except LaunchManagerError as error:
         raise _to_http_error(error) from error
