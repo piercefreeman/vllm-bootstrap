@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,12 @@ from vllm_bootstrap.manager import (
     LaunchValidationError,
     VLLMEnvironmentManager,
 )
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _load_fixture(name: str) -> str:
+    return (FIXTURES_DIR / name).read_text()
 
 
 def _wait_until(
@@ -59,6 +66,18 @@ def _fake_server_command(*, extra_lines: list[str]) -> list[str]:
     return [sys.executable, "-u", "-c", script]
 
 
+def _vllm_error_server_command() -> list[str]:
+    fixture_path = FIXTURES_DIR / "vllm_startup_error.txt"
+    script = (
+        "import sys\n"
+        f"data = open({str(fixture_path)!r}).read()\n"
+        "sys.stdout.write(data)\n"
+        "sys.stdout.flush()\n"
+        "sys.exit(1)\n"
+    )
+    return [sys.executable, "-u", "-c", script]
+
+
 def _split_marker_server_command() -> list[str]:
     script = (
         "import signal, sys, time\n"
@@ -88,7 +107,9 @@ def manager(tmp_path: Path) -> VLLMEnvironmentManager:
 def test_launch_defaults_to_all_gpus_and_conflicts(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
-    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0, 1])
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
     monkeypatch.setattr(
         manager,
         "_build_command",
@@ -122,7 +143,9 @@ def test_launch_defaults_to_all_gpus_and_conflicts(
 def test_logs_follow_offset(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
-    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0])
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
     monkeypatch.setattr(
         manager,
         "_build_command",
@@ -150,7 +173,9 @@ def test_logs_follow_offset(
 def test_launch_honors_requested_gpus_and_port(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
-    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0, 1, 2])
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
     monkeypatch.setattr(
         manager,
         "_build_command",
@@ -159,18 +184,18 @@ def test_launch_honors_requested_gpus_and_port(
 
     first_launch = manager.launch(
         model="custom-model",
-        gpu_ids=[1, 2],
+        gpu_ids=[1],
         port=43123,
         extra_args=[],
     )
-    assert first_launch.gpu_ids == [1, 2]
+    assert first_launch.gpu_ids == [1]
     assert first_launch.port == 43123
 
     _wait_until(
         lambda: manager.get_status(first_launch.launch_id).state == LaunchState.READY
     )
     logs = manager.read_logs(first_launch.launch_id, 0)
-    assert "CUDA_VISIBLE_DEVICES=1,2" in logs.content
+    assert "CUDA_VISIBLE_DEVICES=1" in logs.content
 
     with pytest.raises(LaunchConflictError):
         manager.launch(
@@ -198,7 +223,9 @@ def test_ready_marker_detected_across_log_chunks(
     manager = VLLMEnvironmentManager(settings=settings)
 
     try:
-        monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0])
+        nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
         monkeypatch.setattr(
             manager, "_build_command", lambda **_: _split_marker_server_command()
         )
@@ -219,6 +246,97 @@ def test_ready_marker_detected_across_log_chunks(
 def test_launch_requires_model(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
-    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0])
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
     with pytest.raises(LaunchValidationError):
         manager.launch(model="   ", gpu_ids=None, port=None, extra_args=[])
+
+
+def test_discover_gpu_ids_parses_real_nvidia_smi_output(
+    monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
+) -> None:
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+
+    gpu_ids = manager._discover_gpu_ids()
+    assert gpu_ids == [0, 1]
+
+
+def test_discover_gpu_ids_nvidia_smi_unavailable(
+    monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _raise_file_not_found(*_a, **_kw):
+        raise FileNotFoundError("nvidia-smi not found")
+
+    monkeypatch.setattr(subprocess, "check_output", _raise_file_not_found)
+
+    with pytest.raises(LaunchValidationError, match="nvidia-smi is unavailable"):
+        manager._discover_gpu_ids()
+
+
+def test_discover_gpu_ids_nvidia_smi_failure(
+    monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _raise_called_process_error(*_a, **_kw):
+        raise subprocess.CalledProcessError(
+            returncode=1, cmd=["nvidia-smi"], output="NVIDIA-SMI has failed"
+        )
+
+    monkeypatch.setattr(subprocess, "check_output", _raise_called_process_error)
+
+    with pytest.raises(LaunchValidationError, match="Failed to discover GPUs"):
+        manager._discover_gpu_ids()
+
+
+def test_vllm_error_output_triggers_failed_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base_port = 42000 + (os.getpid() % 1000)
+    settings = Settings(
+        launch_host="127.0.0.1",
+        launch_port_start=base_port,
+        launch_port_end=base_port + 100,
+        log_dir=tmp_path / "logs",
+        stop_timeout_seconds=2.0,
+        log_read_chunk_bytes=64 * 1024,
+        ready_scan_chunk_bytes=64 * 1024,
+        ready_markers=("Application startup complete", "Uvicorn running on"),
+    )
+    manager = VLLMEnvironmentManager(settings=settings)
+
+    try:
+        nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+        monkeypatch.setattr(
+            manager,
+            "_build_command",
+            lambda **_: _vllm_error_server_command(),
+        )
+
+        launch = manager.launch(
+            model="fake-model",
+            gpu_ids=None,
+            port=None,
+            extra_args=[],
+        )
+
+        _wait_until(
+            lambda: manager.get_status(launch.launch_id).state == LaunchState.FAILED
+        )
+
+        status = manager.get_status(launch.launch_id)
+        assert status.state == LaunchState.FAILED
+        assert status.return_code != 0
+
+        logs = manager.read_logs(launch.launch_id, 0)
+        assert "OSError" in logs.content
+        assert "fake-model" in logs.content
+    finally:
+        manager.stop_all()
