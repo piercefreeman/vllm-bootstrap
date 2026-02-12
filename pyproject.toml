@@ -1,0 +1,30 @@
+[project]
+name = "vllm-bootstrap"
+version = "0.1.0"
+description = "FastAPI control plane for launching and managing vLLM jobs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "vllm>=0.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+vllm-bootstrap = "vllm_bootstrap.__main__:main"
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vllm_bootstrap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
