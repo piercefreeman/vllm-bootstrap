@@ -109,7 +109,9 @@ def test_launch_defaults_to_all_gpus_and_conflicts(
 ) -> None:
     nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
     monkeypatch.setattr(
         manager,
         "_build_command",
@@ -145,7 +147,9 @@ def test_logs_follow_offset(
 ) -> None:
     nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
     monkeypatch.setattr(
         manager,
         "_build_command",
@@ -175,7 +179,9 @@ def test_launch_honors_requested_gpus_and_port(
 ) -> None:
     nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
     monkeypatch.setattr(
         manager,
         "_build_command",
@@ -225,7 +231,9 @@ def test_ready_marker_detected_across_log_chunks(
     try:
         nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+        monkeypatch.setattr(
+            subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+        )
         monkeypatch.setattr(
             manager, "_build_command", lambda **_: _split_marker_server_command()
         )
@@ -248,7 +256,9 @@ def test_launch_requires_model(
 ) -> None:
     nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
     with pytest.raises(LaunchValidationError):
         manager.launch(model="   ", gpu_ids=None, port=None, extra_args=[])
 
@@ -258,7 +268,9 @@ def test_discover_gpu_ids_parses_real_nvidia_smi_output(
 ) -> None:
     nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
 
     gpu_ids = manager._discover_gpu_ids()
     assert gpu_ids == [0, 1]
@@ -313,7 +325,9 @@ def test_vllm_error_output_triggers_failed_state(
     try:
         nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        monkeypatch.setattr(subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture)
+        monkeypatch.setattr(
+            subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+        )
         monkeypatch.setattr(
             manager,
             "_build_command",
