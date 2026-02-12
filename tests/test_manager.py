@@ -11,6 +11,7 @@ from vllm_bootstrap.config import Settings
 from vllm_bootstrap.manager import (
     LaunchConflictError,
     LaunchState,
+    LaunchValidationError,
     VLLMEnvironmentManager,
 )
 
@@ -29,7 +30,6 @@ def _wait_until(
 def _make_settings(tmp_path: Path) -> Settings:
     base_port = 42000 + (os.getpid() % 1000)
     return Settings(
-        default_model="test-model",
         launch_host="127.0.0.1",
         launch_port_start=base_port,
         launch_port_end=base_port + 100,
@@ -88,14 +88,19 @@ def manager(tmp_path: Path) -> VLLMEnvironmentManager:
 def test_launch_defaults_to_all_gpus_and_conflicts(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
-    monkeypatch.setenv("VLLM_GPU_INDICES", "0,1")
+    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0, 1])
     monkeypatch.setattr(
         manager,
         "_build_command",
         lambda **_: _fake_server_command(extra_lines=["bootstrapping complete"]),
     )
 
-    first_launch = manager.launch(model=None, gpu_ids=None, port=None, extra_args=[])
+    first_launch = manager.launch(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        gpu_ids=None,
+        port=None,
+        extra_args=[],
+    )
     assert first_launch.gpu_ids == [0, 1]
 
     _wait_until(
@@ -103,7 +108,12 @@ def test_launch_defaults_to_all_gpus_and_conflicts(
     )
 
     with pytest.raises(LaunchConflictError):
-        manager.launch(model=None, gpu_ids=None, port=None, extra_args=[])
+        manager.launch(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            gpu_ids=None,
+            port=None,
+            extra_args=[],
+        )
 
     stopped = manager.stop(first_launch.launch_id)
     assert stopped.state == LaunchState.STOPPED
@@ -112,14 +122,19 @@ def test_launch_defaults_to_all_gpus_and_conflicts(
 def test_logs_follow_offset(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
-    monkeypatch.setenv("VLLM_GPU_INDICES", "0")
+    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0])
     monkeypatch.setattr(
         manager,
         "_build_command",
         lambda **_: _fake_server_command(extra_lines=["line-one", "line-two"]),
     )
 
-    launch = manager.launch(model=None, gpu_ids=None, port=None, extra_args=[])
+    launch = manager.launch(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        gpu_ids=None,
+        port=None,
+        extra_args=[],
+    )
 
     def _has_log_content() -> bool:
         return "line-one" in manager.read_logs(launch.launch_id, 0).content
@@ -135,7 +150,7 @@ def test_logs_follow_offset(
 def test_launch_honors_requested_gpus_and_port(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
-    monkeypatch.setenv("VLLM_GPU_INDICES", "0,1,2")
+    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0, 1, 2])
     monkeypatch.setattr(
         manager,
         "_build_command",
@@ -171,7 +186,6 @@ def test_ready_marker_detected_across_log_chunks(
 ) -> None:
     settings = _make_settings(tmp_path)
     settings = Settings(
-        default_model=settings.default_model,
         launch_host=settings.launch_host,
         launch_port_start=settings.launch_port_start,
         launch_port_end=settings.launch_port_end,
@@ -184,14 +198,27 @@ def test_ready_marker_detected_across_log_chunks(
     manager = VLLMEnvironmentManager(settings=settings)
 
     try:
-        monkeypatch.setenv("VLLM_GPU_INDICES", "0")
+        monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0])
         monkeypatch.setattr(
             manager, "_build_command", lambda **_: _split_marker_server_command()
         )
 
-        launch = manager.launch(model=None, gpu_ids=None, port=None, extra_args=[])
+        launch = manager.launch(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            gpu_ids=None,
+            port=None,
+            extra_args=[],
+        )
         _wait_until(
             lambda: manager.get_status(launch.launch_id).state == LaunchState.READY
         )
     finally:
         manager.stop_all()
+
+
+def test_launch_requires_model(
+    monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
+) -> None:
+    monkeypatch.setattr(manager, "_discover_gpu_ids", lambda: [0])
+    with pytest.raises(LaunchValidationError):
+        manager.launch(model="   ", gpu_ids=None, port=None, extra_args=[])

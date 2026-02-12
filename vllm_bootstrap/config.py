@@ -7,7 +7,6 @@ from pathlib import Path
 
 @dataclass(slots=True, frozen=True)
 class Settings:
-    default_model: str
     launch_host: str
     launch_port_start: int
     launch_port_end: int
@@ -31,9 +30,6 @@ def load_settings() -> Settings:
         raise ValueError("VLLM_LAUNCH_PORT_START must be <= VLLM_LAUNCH_PORT_END")
 
     return Settings(
-        default_model=os.getenv(
-            "VLLM_DEFAULT_MODEL", "meta-llama/Llama-3.1-8B-Instruct"
-        ),
         launch_host=os.getenv("VLLM_LAUNCH_HOST", "0.0.0.0"),
         launch_port_start=port_start,
         launch_port_end=port_end,

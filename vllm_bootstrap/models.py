@@ -12,9 +12,9 @@ def _as_datetime(timestamp: float) -> datetime:
 
 
 class LaunchRequest(BaseModel):
-    model: str | None = Field(
-        default=None,
-        description="Model id/path passed to vLLM. Defaults to VLLM_DEFAULT_MODEL.",
+    model: str = Field(
+        min_length=1,
+        description="Model id/path passed to vLLM. Required.",
     )
     gpu_ids: list[int] | None = Field(
         default=None,
