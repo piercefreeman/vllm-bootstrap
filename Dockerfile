@@ -1,4 +1,4 @@
-FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+FROM runpod/pytorch:1.0.3-cu1281-torch280-ubuntu2404
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -14,6 +14,9 @@ COPY vllm_bootstrap ./vllm_bootstrap
 
 RUN uv pip install --system .
 
+COPY run.sh /app/run.sh
+RUN chmod +x /app/run.sh
+
 EXPOSE 8000
 
-CMD ["uvicorn", "vllm_bootstrap.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/run.sh"]

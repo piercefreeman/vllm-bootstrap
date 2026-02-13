@@ -3,7 +3,7 @@ name = "vllm-bootstrap"
 version = "0.1.0"
 description = "FastAPI control plane for launching and managing vLLM jobs"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
