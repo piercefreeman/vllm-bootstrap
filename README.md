@@ -58,13 +58,17 @@ docker run --rm -p 8000:8000 vllm-bootstrap:local
 
 - `VLLM_LAUNCH_PORT_START` / `VLLM_LAUNCH_PORT_END` port range for vLLM child processes.
 - `VLLM_BOOTSTRAP_LOG_DIR` log directory for child process output.
+- `VLLM_ACCESS_KEY` optional shared key that protects all routes.
+  - `Authorization: Bearer <key>` is accepted.
+  - If no auth header is sent, the server returns `401` with a `WWW-Authenticate: Basic` challenge.
+  - HTTP Basic auth is accepted with any username and `<key>` as password.
 
 GPU ownership and default allocation are auto-detected from host hardware via `nvidia-smi`.
 
 ## Tests
 
 ```bash
-PYTHONPATH=. uv run --no-project --with pytest pytest -q
+PYTHONPATH=. uv run --no-project --with pytest --with fastapi --with jinja2 --with pydantic-settings --with httpx pytest -q
 ```
 
 ## Local validation

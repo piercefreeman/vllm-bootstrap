@@ -9,6 +9,6 @@ lint-verify:
 	uv run --no-project --with ruff ruff check .
 
 test:
-	PYTHONPATH=. uv run --no-project --with pytest pytest -q
+	PYTHONPATH=. uv run --no-project --with pytest --with fastapi --with jinja2 --with pydantic-settings --with httpx pytest -q
 
 validate: lint-verify test

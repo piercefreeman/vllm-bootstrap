@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from .auth import build_access_key_middleware
 from .config import load_settings
 from .manager import (
     LaunchConflictError,
@@ -36,6 +37,12 @@ app = FastAPI(
     description="FastAPI wrapper for launching and managing vLLM jobs with explicit GPU ownership.",
     lifespan=lifespan,
 )
+
+
+enforce_access_key = build_access_key_middleware(
+    access_key_getter=lambda: settings.access_key
+)
+app.middleware("http")(enforce_access_key)
 
 
 def _to_http_error(error: LaunchManagerError) -> HTTPException:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import time
 
 from fastapi.testclient import TestClient
@@ -25,7 +26,9 @@ class _StubManager:
         return
 
 
-def _snapshot(*, launch_id: str, state: LaunchState, model: str = "model-a") -> LaunchSnapshot:
+def _snapshot(
+    *, launch_id: str, state: LaunchState, model: str = "model-a"
+) -> LaunchSnapshot:
     now = time.time()
     return LaunchSnapshot(
         launch_id=launch_id,
@@ -71,3 +74,34 @@ def test_home_health_page_empty_state(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert "No running vLLM launches." in response.text
+
+
+def test_access_key_returns_basic_challenge_without_auth_header(monkeypatch) -> None:
+    monkeypatch.setattr(api_module, "manager", _StubManager([]))
+    monkeypatch.setattr(api_module.settings, "access_key", "secret-key")
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Basic realm="vllm-bootstrap"'
+
+
+def test_access_key_accepts_bearer_and_basic_auth(monkeypatch) -> None:
+    monkeypatch.setattr(api_module, "manager", _StubManager([]))
+    monkeypatch.setattr(api_module.settings, "access_key", "secret-key")
+
+    basic_token = base64.b64encode(b"user:secret-key").decode()
+
+    with TestClient(api_module.app) as client:
+        bearer_response = client.get(
+            "/", headers={"Authorization": "Bearer secret-key"}
+        )
+        basic_response = client.get(
+            "/", headers={"Authorization": f"Basic {basic_token}"}
+        )
+        invalid_response = client.get("/", headers={"Authorization": "Bearer wrong"})
+
+    assert bearer_response.status_code == 200
+    assert basic_response.status_code == 200
+    assert invalid_response.status_code == 401
