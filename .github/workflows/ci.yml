@@ -49,6 +49,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - cuda_tag: cuda12.4
+            base_image: vllm/vllm-openai:v0.8.5.post1
 
     steps:
       - name: Free up disk space
@@ -74,20 +79,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        if: startsWith(github.ref, 'refs/tags/v')
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=tag
-            type=raw,value=latest
+      - name: Compute Docker tags
+        id: tags
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            {
+              echo "tags<<EOF"
+              echo "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.cuda_tag }}-${GITHUB_REF_NAME}"
+              echo "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.cuda_tag }}-latest"
+              echo "EOF"
+            } >> "${GITHUB_OUTPUT}"
+          else
+            {
+              echo "tags<<EOF"
+              echo "vllm-bootstrap:ci-${{ matrix.cuda_tag }}"
+              echo "EOF"
+            } >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          tags: ${{ startsWith(github.ref, 'refs/tags/v') && steps.meta.outputs.tags || 'vllm-bootstrap:ci' }}
-          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VLLM_BASE_IMAGE=${{ matrix.base_image }}
+          tags: ${{ steps.tags.outputs.tags }}

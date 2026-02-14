@@ -10,7 +10,8 @@
 
 ## 2. Override the container image
 1. Click `Edit` in the pod template section.
-2. Set `Container image` to `ghcr.io/piercefreeman/vllm-bootstrap:latest`.
+2. Set `Container image` to `ghcr.io/piercefreeman/vllm-bootstrap:cuda12.4-latest`.
+   This tag is aligned with the default `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04` template.
 3. Keep `Expose TCP Ports` as `22`.
 4. Change `Expose HTTP Ports` from `8888` to `8000` if you want to leverage the runpod public proxy service. If you do this, you should make sure to add a `VLLM_ACCESS_KEY` env param that will protect your vllm service. Don't give away that compute for free, you know?
 5. Click `Set Overrides`, then deploy.
