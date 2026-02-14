@@ -13,6 +13,8 @@ If you're interested in a step by step guide for Runpod, check [this out](./docs
   - Requires a `model` to be provided in request body.
   - Defaults to launching on all detected GPUs.
   - Returns `409` if requested/default GPUs are already owned by an active launch.
+- `GET /launch`
+  - Returns active (non-terminal) launches and their metadata.
 - `GET /status/{launch_id}`
   - Returns launch state (`bootstrapping`, `ready`, `stopping`, `stopped`, `failed`) and metadata.
 - `GET /logs/{launch_id}?offset=<int>`
