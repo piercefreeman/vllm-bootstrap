@@ -49,14 +49,20 @@ curl "http://localhost:8000/logs/<launch_id>?offset=0"
 Build:
 
 ```bash
-docker build -t vllm-bootstrap:local .
+docker build \
+  --build-arg VLLM_BASE_IMAGE=vllm/vllm-openai:v0.8.5.post1 \
+  -t vllm-bootstrap:cuda12.4-local .
 ```
 
 Run:
 
 ```bash
-docker run --rm -p 8000:8000 vllm-bootstrap:local
+docker run --rm -p 8000:8000 vllm-bootstrap:cuda12.4-local
 ```
+
+Published images include explicit CUDA tags, for example:
+- `ghcr.io/<owner>/vllm-bootstrap:cuda12.4-latest`
+- `ghcr.io/<owner>/vllm-bootstrap:cuda12.4-vX.Y.Z`
 
 ## Key environment variables
 
