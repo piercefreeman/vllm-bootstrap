@@ -4,6 +4,8 @@ Self contained docker image to treat a remote server (Runpod, GCP, AWS) as a gen
 
 Internally we implement this logic through a FastAPI control plane for launching and managing vLLM servers with explicit GPU ownership.
 
+If you're interested in a step by step guide, check [this out](./docs/GETTING_STARTED.md).
+
 ## API
 
 - `POST /launch`
@@ -17,6 +19,10 @@ Internally we implement this logic through a FastAPI control plane for launching
   - Returns log chunk and next offset for incremental log streaming.
 - `POST /stop/{launch_id}`
   - Stops the managed launch and releases its GPU ownership.
+- `ANY /proxy/{launch_id}/{upstream_path}`
+  - Reverse proxies requests to the launched vLLM server for that `launch_id`.
+  - Requires the launch to be in `ready` state; returns `409` otherwise.
+  - For compatibility with OpenAI-style clients, payloads are passed through without strict request-body schema validation.
 
 ## Run locally
 
@@ -56,13 +62,17 @@ docker run --rm -p 8000:8000 vllm-bootstrap:local
 
 - `VLLM_LAUNCH_PORT_START` / `VLLM_LAUNCH_PORT_END` port range for vLLM child processes.
 - `VLLM_BOOTSTRAP_LOG_DIR` log directory for child process output.
+- `VLLM_ACCESS_KEY` optional shared key that protects all routes.
+  - `Authorization: Bearer <key>` is accepted.
+  - If no auth header is sent, the server returns `401` with a `WWW-Authenticate: Basic` challenge.
+  - HTTP Basic auth is accepted with any username and `<key>` as password.
 
 GPU ownership and default allocation are auto-detected from host hardware via `nvidia-smi`.
 
 ## Tests
 
 ```bash
-PYTHONPATH=. uv run --no-project --with pytest pytest -q
+PYTHONPATH=. uv run --no-project --with pytest --with fastapi --with jinja2 --with pydantic-settings --with httpx pytest -q
 ```
 
 ## Local validation
