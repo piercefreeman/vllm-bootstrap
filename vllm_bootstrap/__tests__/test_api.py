@@ -83,6 +83,32 @@ def test_home_health_page_empty_state(monkeypatch) -> None:
     assert "No running vLLM launches." in response.text
 
 
+def test_list_launches_returns_active_launches_with_metadata(monkeypatch) -> None:
+    snapshots = [
+        _snapshot(launch_id="ready-1", state=LaunchState.READY, model="model-ready"),
+        _snapshot(
+            launch_id="stopped-1", state=LaunchState.STOPPED, model="model-stopped"
+        ),
+    ]
+    monkeypatch.setattr(api_module, "manager", _StubManager(snapshots))
+    monkeypatch.setattr(api_module.settings, "access_key", None)
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/launch")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    assert payload[0]["launch_id"] == "ready-1"
+    assert payload[0]["model"] == "model-ready"
+    assert payload[0]["gpu_ids"] == [0, 1]
+    assert payload[0]["port"] == 8001
+    assert payload[0]["state"] == "ready"
+    assert "created_at" in payload[0]
+    assert "updated_at" in payload[0]
+
+
 def test_access_key_returns_basic_challenge_without_auth_header(monkeypatch) -> None:
     monkeypatch.setattr(api_module, "manager", _StubManager([]))
     monkeypatch.setattr(api_module.settings, "access_key", "secret-key")

@@ -164,6 +164,15 @@ def launch(request: LaunchRequest) -> LaunchResponse:
     return LaunchResponse.from_snapshot(snapshot)
 
 
+@app.get("/launch", response_model=list[LaunchResponse])
+def list_launches() -> list[LaunchResponse]:
+    try:
+        snapshots = manager.list_launches(include_terminal=False)
+    except LaunchManagerError as error:
+        raise _to_http_error(error) from error
+    return [LaunchResponse.from_snapshot(snapshot) for snapshot in snapshots]
+
+
 @app.get("/status/{launch_id}", response_model=LaunchResponse)
 def status(launch_id: str) -> LaunchResponse:
     try:
