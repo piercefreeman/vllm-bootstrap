@@ -12,7 +12,7 @@
 1. Click `Edit` in the pod template section.
 2. Set `Container image` to `ghcr.io/piercefreeman/vllm-bootstrap:latest`.
 3. Keep `Expose TCP Ports` as `22`.
-4. Change `Expose HTTP Ports` from `8888` to `8000` (required).
+4. Change `Expose HTTP Ports` from `8888` to `8000` if you want to leverage the runpod public proxy service. If you do this, you should make sure to add a `VLLM_ACCESS_KEY` env param that will protect your vllm service. Don't give away that compute for free, you know?
 5. Click `Set Overrides`, then deploy.
 
 ![RunPod template overrides](../media/runpod_2.png)
