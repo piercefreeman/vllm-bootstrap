@@ -174,6 +174,39 @@ def test_logs_follow_offset(
     assert second_chunk.content == ""
 
 
+def test_list_launches_filters_terminal_states(
+    monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
+) -> None:
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
+    monkeypatch.setattr(
+        manager,
+        "_build_command",
+        lambda **_: _fake_server_command(extra_lines=["ready"]),
+    )
+
+    launch = manager.launch(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        gpu_ids=None,
+        port=None,
+        extra_args=[],
+    )
+    _wait_until(lambda: manager.get_status(launch.launch_id).state == LaunchState.READY)
+
+    active = manager.list_launches()
+    assert [snapshot.launch_id for snapshot in active] == [launch.launch_id]
+
+    manager.stop(launch.launch_id)
+    assert manager.list_launches() == []
+
+    with_terminal = manager.list_launches(include_terminal=True)
+    assert len(with_terminal) == 1
+    assert with_terminal[0].state == LaunchState.STOPPED
+
+
 def test_launch_honors_requested_gpus_and_port(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:

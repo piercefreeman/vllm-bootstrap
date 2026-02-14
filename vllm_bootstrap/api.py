@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 
 from .config import load_settings
 from .manager import (
@@ -17,6 +21,7 @@ from .models import LaunchRequest, LaunchResponse, LogsResponse
 
 settings = load_settings()
 manager = VLLMEnvironmentManager(settings=settings)
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
 @asynccontextmanager
@@ -41,6 +46,28 @@ def _to_http_error(error: LaunchManagerError) -> HTTPException:
     if isinstance(error, LaunchValidationError):
         return HTTPException(status_code=400, detail=str(error))
     return HTTPException(status_code=500, detail=str(error))
+
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request) -> HTMLResponse:
+    active_launches = manager.list_launches(include_terminal=False)
+    launches = [
+        {
+            "launch_id": snapshot.launch_id,
+            "model": snapshot.model,
+            "gpu_ids": ", ".join(str(gpu_id) for gpu_id in snapshot.gpu_ids),
+            "port": snapshot.port,
+            "state": snapshot.state.value,
+            "updated_at": datetime.fromtimestamp(snapshot.updated_at, tz=UTC),
+        }
+        for snapshot in reversed(active_launches)
+    ]
+    context = {
+        "request": request,
+        "launches": launches,
+        "generated_at": datetime.now(tz=UTC),
+    }
+    return templates.TemplateResponse(request, "home.html", context)
 
 
 @app.post("/launch", response_model=LaunchResponse, status_code=201)

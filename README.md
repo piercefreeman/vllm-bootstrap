@@ -4,6 +4,8 @@ Self contained docker image to treat a remote server (Runpod, GCP, AWS) as a gen
 
 Internally we implement this logic through a FastAPI control plane for launching and managing vLLM servers with explicit GPU ownership.
 
+If you're interested in a step by step guide, check [this out](./docs/GETTING_STARTED.md).
+
 ## API
 
 - `POST /launch`

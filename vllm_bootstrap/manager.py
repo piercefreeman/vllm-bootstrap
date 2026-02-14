@@ -157,6 +157,19 @@ class VLLMEnvironmentManager:
             self._refresh_record(record)
             return self._snapshot(record)
 
+    def list_launches(self, *, include_terminal: bool = False) -> list[LaunchSnapshot]:
+        with self._lock:
+            snapshots: list[LaunchSnapshot] = []
+            records = sorted(
+                self._launches.values(), key=lambda record: record.created_at
+            )
+            for record in records:
+                self._refresh_record(record)
+                if not include_terminal and record.state in TERMINAL_STATES:
+                    continue
+                snapshots.append(self._snapshot(record))
+            return snapshots
+
     def read_logs(self, launch_id: str, offset: int) -> LogSnapshot:
         if offset < 0:
             raise LaunchValidationError("offset must be >= 0")
