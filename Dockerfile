@@ -8,7 +8,8 @@ WORKDIR /app
 COPY pyproject.toml README.md main.py ./
 COPY vllm_bootstrap ./vllm_bootstrap
 
-RUN pip install --no-deps .
+# vllm comes from the base image; package deps here are the control-plane runtime deps.
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 

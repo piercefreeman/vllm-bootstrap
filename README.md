@@ -30,6 +30,12 @@ If you're interested in a step by step guide for Runpod, check [this out](./docs
 uv run vllm-bootstrap
 ```
 
+If your environment does not already include `vllm`, install with the optional extra:
+
+```bash
+pip install ".[vllm]"
+```
+
 Example launch request:
 
 ```bash
