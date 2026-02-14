@@ -19,6 +19,10 @@ If you're interested in a step by step guide, check [this out](./docs/GETTING_ST
   - Returns log chunk and next offset for incremental log streaming.
 - `POST /stop/{launch_id}`
   - Stops the managed launch and releases its GPU ownership.
+- `ANY /proxy/{launch_id}/{upstream_path}`
+  - Reverse proxies requests to the launched vLLM server for that `launch_id`.
+  - Requires the launch to be in `ready` state; returns `409` otherwise.
+  - For compatibility with OpenAI-style clients, payloads are passed through without strict request-body schema validation.
 
 ## Run locally
 
