@@ -54,7 +54,7 @@ curl "http://localhost:8000/logs/<launch_id>?offset=0"
 
 ## Docker
 
-Most often you'll want to point your remote box to our image directly. Check what CUDA version it supports on the hardware (this is passed through
+Most often you'll want to point your remote box to our image directly. Check what CUDA version it supports on the host box (this is passed through
 to the container). For a device with 12.4:
 
 ```
