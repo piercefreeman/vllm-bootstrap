@@ -54,7 +54,14 @@ curl "http://localhost:8000/logs/<launch_id>?offset=0"
 
 ## Docker
 
-Build:
+Most often you'll want to point your remote box to our image directly. Check what CUDA version it supports on the hardware (this is passed through
+to the container). For a device with 12.4:
+
+```
+docker pull ghcr.io/piercefreeman/vllm-bootstrap:cuda12.4-latest
+```
+
+If you want to build locally:
 
 ```bash
 docker build \
@@ -67,10 +74,6 @@ Run:
 ```bash
 docker run --rm -p 8000:8000 vllm-bootstrap:cuda12.4-local
 ```
-
-Published images include explicit CUDA tags, for example:
-- `ghcr.io/<owner>/vllm-bootstrap:cuda12.4-latest`
-- `ghcr.io/<owner>/vllm-bootstrap:cuda12.4-vX.Y.Z`
 
 ## Key environment variables
 
