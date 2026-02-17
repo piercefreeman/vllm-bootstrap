@@ -1,0 +1,45 @@
+syntax = "proto3";
+package vllm_bootstrap;
+
+service InferenceService {
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
+}
+
+message EmbedRequest {
+  string launch_id = 1;
+  repeated string texts = 2;
+}
+message EmbedResponse {
+  repeated Embedding embeddings = 1;
+}
+message Embedding {
+  repeated float values = 1;
+}
+
+message GuidedDecodingParams {
+  oneof kind {
+    string json_schema = 1;
+    string regex = 2;
+    string grammar = 3;
+  }
+  repeated string choice = 4;
+}
+
+message Completion {
+  string text = 1;
+  int32 prompt_tokens = 2;
+  int32 completion_tokens = 3;
+}
+
+message CompleteRequest {
+  string launch_id = 1;
+  repeated string prompts = 2;
+  int32 max_tokens = 3;
+  optional float temperature = 4;
+  optional float top_p = 5;
+  optional GuidedDecodingParams guided_decoding = 6;
+}
+message CompleteResponse {
+  repeated Completion completions = 1;
+}

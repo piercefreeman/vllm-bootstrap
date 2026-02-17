@@ -11,7 +11,7 @@ COPY vllm_bootstrap ./vllm_bootstrap
 # vllm comes from the base image; package deps here are the control-plane runtime deps.
 RUN pip install --no-cache-dir .
 
-EXPOSE 8000
+EXPOSE 8000 8001
 
 ENTRYPOINT []
-CMD ["uvicorn", "vllm_bootstrap.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "vllm_bootstrap"]

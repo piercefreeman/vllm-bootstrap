@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 import logging
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
@@ -16,7 +15,6 @@ from .manager import (
     LaunchConflictError,
     LaunchManagerError,
     LaunchNotFoundError,
-    LaunchState,
     LaunchValidationError,
     VLLMEnvironmentManager,
 )
@@ -27,17 +25,6 @@ settings = load_settings()
 manager = VLLMEnvironmentManager(settings=settings)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 logger = logging.getLogger(__name__)
-HOP_BY_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-}
-PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 
 
 @asynccontextmanager
@@ -70,12 +57,6 @@ def _to_http_error(error: LaunchManagerError) -> HTTPException:
     return HTTPException(status_code=500, detail=str(error))
 
 
-def _resolve_upstream_host(host: str) -> str:
-    if host in {"0.0.0.0", "::"}:
-        return "127.0.0.1"
-    return host
-
-
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     active_launches = manager.list_launches(include_terminal=False)
@@ -84,7 +65,7 @@ def home(request: Request) -> HTMLResponse:
             "launch_id": snapshot.launch_id,
             "model": snapshot.model,
             "gpu_ids": ", ".join(str(gpu_id) for gpu_id in snapshot.gpu_ids),
-            "port": snapshot.port,
+            "task": snapshot.task,
             "state": snapshot.state.value,
             "updated_at": datetime.fromtimestamp(snapshot.updated_at, tz=UTC),
         }
@@ -98,68 +79,14 @@ def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "home.html", context)
 
 
-@app.api_route("/proxy/{launch_id}/{upstream_path:path}", methods=PROXY_METHODS)
-async def proxy_to_vllm(
-    launch_id: str, upstream_path: str, request: Request
-) -> Response:
-    try:
-        snapshot = manager.get_status(launch_id)
-    except LaunchManagerError as error:
-        raise _to_http_error(error) from error
-
-    if snapshot.state != LaunchState.READY:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Launch {launch_id} is not ready (state={snapshot.state.value})",
-        )
-
-    upstream_host = _resolve_upstream_host(settings.launch_host)
-    normalized_path = upstream_path.lstrip("/")
-    upstream_url = f"http://{upstream_host}:{snapshot.port}/{normalized_path}"
-    if request.url.query:
-        upstream_url = f"{upstream_url}?{request.url.query}"
-
-    upstream_headers = {
-        key: value
-        for key, value in request.headers.items()
-        if key.lower() not in HOP_BY_HOP_HEADERS | {"host", "content-length"}
-    }
-    body = await request.body()
-
-    try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=None) as client:
-            upstream_response = await client.request(
-                method=request.method,
-                url=upstream_url,
-                headers=upstream_headers,
-                content=body,
-            )
-    except httpx.RequestError as error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to reach launch {launch_id} upstream server: {error}",
-        ) from error
-
-    response_headers = {
-        key: value
-        for key, value in upstream_response.headers.items()
-        if key.lower() not in HOP_BY_HOP_HEADERS | {"content-length"}
-    }
-    return Response(
-        content=upstream_response.content,
-        status_code=upstream_response.status_code,
-        headers=response_headers,
-    )
-
-
 @app.post("/launch", response_model=LaunchResponse, status_code=201)
 def launch(request: LaunchRequest) -> LaunchResponse:
     try:
         snapshot = manager.launch(
             model=request.model,
             gpu_ids=request.gpu_ids,
-            port=request.port,
-            extra_args=request.extra_args,
+            task=request.task,
+            extra_kwargs=request.extra_kwargs,
         )
     except LaunchManagerError as error:
         raise _to_http_error(error) from error

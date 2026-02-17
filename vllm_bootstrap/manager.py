@@ -1,23 +1,22 @@
 from __future__ import annotations
 
 import csv
+import gc
+import logging
 import os
 import re
-import signal
-import socket
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-from typing import IO, Sequence
+from typing import Any, Sequence
 
 from .config import Settings
 
-_PROCESS_LOG_CHUNK_BYTES = 8192
+logger = logging.getLogger(__name__)
 
 
 class LaunchState(str, Enum):
@@ -36,11 +35,10 @@ class LaunchSnapshot:
     launch_id: str
     model: str
     gpu_ids: list[int]
-    port: int
+    task: str
     state: LaunchState
     created_at: float
     updated_at: float
-    return_code: int | None
     error: str | None
 
 
@@ -88,16 +86,14 @@ class _LaunchRecord:
     launch_id: str
     model: str
     gpu_ids: list[int]
-    port: int
+    task: str
     state: LaunchState
     created_at: float
     updated_at: float
-    process: subprocess.Popen[bytes]
-    log_path: Path
-    return_code: int | None = None
+    llm: Any | None  # vllm.LLM when loaded
+    log_lines: list[str] = field(default_factory=list)
     error: str | None = None
-    ready_scan_offset: int = 0
-    ready_scan_tail: str = ""
+    _load_thread: threading.Thread | None = None
 
 
 class LaunchManagerError(Exception):
@@ -136,92 +132,139 @@ _NVIDIA_SMI_GPU_QUERY_COMMAND = [
 _NA_TOKENS = {"", "N/A", "[N/A]", "Not Supported", "[Not Supported]"}
 
 
+class _RecordLogHandler(logging.Handler):
+    """Captures vllm log output into a record's log_lines list."""
+
+    def __init__(self, record: _LaunchRecord) -> None:
+        super().__init__()
+        self._record = record
+
+    def emit(self, log_record: logging.LogRecord) -> None:
+        line = self.format(log_record)
+        self._record.log_lines.append(line)
+        # Also mirror to stdout
+        try:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+
 class VLLMEnvironmentManager:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._settings.log_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._system_output_lock = threading.Lock()
+        self._construction_lock = threading.Lock()
         self._launches: dict[str, _LaunchRecord] = {}
         self._gpu_owners: dict[int, str] = {}
-        self._max_ready_marker_len = max(
-            len(marker) for marker in self._settings.ready_markers
-        )
 
     def launch(
         self,
         *,
         model: str,
         gpu_ids: Sequence[int] | None,
-        port: int | None,
-        extra_args: Sequence[str],
+        task: str = "generate",
+        extra_kwargs: dict[str, Any] | None = None,
     ) -> LaunchSnapshot:
         selected_model = model.strip()
         if not selected_model:
             raise LaunchValidationError("model must be provided")
 
+        if task not in ("generate", "embed"):
+            raise LaunchValidationError("task must be 'generate' or 'embed'")
+
         with self._lock:
             available_gpu_ids = self._discover_gpu_ids()
             selected_gpu_ids = self._resolve_gpu_ids(available_gpu_ids, gpu_ids)
             self._assert_gpu_availability(selected_gpu_ids)
-            selected_port = self._select_port(port)
             launch_id = str(uuid.uuid4())
-
-            log_path = self._settings.log_dir / f"{launch_id}.log"
-            command = self._build_command(
-                model=selected_model,
-                port=selected_port,
-                tensor_parallel_size=len(selected_gpu_ids),
-                extra_args=extra_args,
-            )
-            log_path.touch(exist_ok=True)
-            environment = os.environ.copy()
-            environment["CUDA_VISIBLE_DEVICES"] = ",".join(
-                str(gpu_id) for gpu_id in selected_gpu_ids
-            )
-
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=environment,
-            )
-            if process.stdout is None:
-                raise LaunchManagerError(
-                    "Failed to capture vLLM process output stream."
-                )
-            threading.Thread(
-                target=self._forward_process_output,
-                args=(process.stdout, log_path),
-                daemon=True,
-                name=f"vllm-log-forwarder-{launch_id}",
-            ).start()
 
             created_at = time.time()
             record = _LaunchRecord(
                 launch_id=launch_id,
                 model=selected_model,
                 gpu_ids=selected_gpu_ids,
-                port=selected_port,
+                task=task,
                 state=LaunchState.BOOTSTRAPPING,
                 created_at=created_at,
                 updated_at=created_at,
-                process=process,
-                log_path=log_path,
+                llm=None,
             )
             self._launches[launch_id] = record
             for gpu_id in selected_gpu_ids:
                 self._gpu_owners[gpu_id] = launch_id
 
-            self._refresh_record(record)
+            load_thread = threading.Thread(
+                target=self._load_model_thread,
+                args=(record, extra_kwargs or {}),
+                daemon=True,
+                name=f"vllm-loader-{launch_id}",
+            )
+            record._load_thread = load_thread
+            load_thread.start()
+
             return self._snapshot(record)
+
+    def _load_model_thread(
+        self, record: _LaunchRecord, extra_kwargs: dict[str, Any]
+    ) -> None:
+        log_handler = _RecordLogHandler(record)
+        log_handler.setFormatter(
+            logging.Formatter("%(levelname)s %(name)s: %(message)s")
+        )
+        vllm_logger = logging.getLogger("vllm")
+        vllm_logger.addHandler(log_handler)
+        if vllm_logger.level == logging.NOTSET or vllm_logger.level > logging.DEBUG:
+            vllm_logger.setLevel(logging.DEBUG)
+        try:
+            with self._construction_lock:
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(gpu_id) for gpu_id in record.gpu_ids
+                )
+
+                import vllm
+
+                # vLLM >= 0.15 uses runner/convert instead of task
+                vllm_kwargs: dict[str, Any] = {
+                    "model": record.model,
+                    "tensor_parallel_size": len(record.gpu_ids),
+                }
+                if record.task == "embed":
+                    vllm_kwargs["runner"] = "pooling"
+                    vllm_kwargs["convert"] = "embed"
+
+                vllm_kwargs.update(extra_kwargs)
+                llm = vllm.LLM(**vllm_kwargs)
+
+            with self._lock:
+                if record.state == LaunchState.BOOTSTRAPPING:
+                    record.llm = llm
+                    record.state = LaunchState.READY
+                    record.updated_at = time.time()
+        except Exception as exc:
+            with self._lock:
+                record.error = str(exc)
+                record.state = LaunchState.FAILED
+                record.updated_at = time.time()
+                self._release_gpus(record)
+        finally:
+            vllm_logger.removeHandler(log_handler)
 
     def get_status(self, launch_id: str) -> LaunchSnapshot:
         with self._lock:
             record = self._require_record(launch_id)
-            self._refresh_record(record)
             return self._snapshot(record)
+
+    def get_llm(self, launch_id: str) -> tuple[Any, str]:
+        """Get the LLM instance and task for a launch. Used by gRPC servicer."""
+        with self._lock:
+            record = self._require_record(launch_id)
+            if record.state != LaunchState.READY or record.llm is None:
+                raise LaunchConflictError(
+                    f"Launch {launch_id} is not ready (state={record.state.value})"
+                )
+            return record.llm, record.task
 
     def list_launches(self, *, include_terminal: bool = False) -> list[LaunchSnapshot]:
         with self._lock:
@@ -230,7 +273,6 @@ class VLLMEnvironmentManager:
                 self._launches.values(), key=lambda record: record.created_at
             )
             for record in records:
-                self._refresh_record(record)
                 if not include_terminal and record.state in TERMINAL_STATES:
                     continue
                 snapshots.append(self._snapshot(record))
@@ -242,51 +284,57 @@ class VLLMEnvironmentManager:
 
         with self._lock:
             record = self._require_record(launch_id)
-            self._refresh_record(record)
-            log_path = record.log_path
+            all_content = "\n".join(record.log_lines)
+            if record.log_lines:
+                all_content += "\n"
 
-        if not log_path.exists():
-            return LogSnapshot(
-                launch_id=launch_id, offset=offset, next_offset=offset, content=""
-            )
-
-        with log_path.open("rb") as log_file:
-            log_file.seek(0, os.SEEK_END)
-            file_size = log_file.tell()
-            effective_offset = min(offset, file_size)
-            log_file.seek(effective_offset)
-            content = log_file.read(self._settings.log_read_chunk_bytes)
-            next_offset = log_file.tell()
+        content_bytes = all_content.encode("utf-8")
+        file_size = len(content_bytes)
+        effective_offset = min(offset, file_size)
+        chunk = content_bytes[
+            effective_offset : effective_offset + self._settings.log_read_chunk_bytes
+        ]
+        next_offset = effective_offset + len(chunk)
 
         return LogSnapshot(
             launch_id=launch_id,
             offset=effective_offset,
             next_offset=next_offset,
-            content=content.decode("utf-8", errors="replace"),
+            content=chunk.decode("utf-8", errors="replace"),
         )
 
     def stop(self, launch_id: str) -> LaunchSnapshot:
         with self._lock:
             record = self._require_record(launch_id)
-            self._refresh_record(record)
             if record.state in TERMINAL_STATES:
                 return self._snapshot(record)
 
+            logger.info("Starting shutdown for launch_id=%s", launch_id)
             record.state = LaunchState.STOPPING
             record.updated_at = time.time()
-            process = record.process
 
-        self._terminate_process(process)
+        # Clean up the LLM instance
+        self._cleanup_llm(record)
 
         with self._lock:
             record = self._require_record(launch_id)
-            self._refresh_record(record)
             if record.state not in TERMINAL_STATES:
                 record.state = LaunchState.STOPPED
-                record.return_code = process.poll()
                 record.updated_at = time.time()
                 self._release_gpus(record)
             return self._snapshot(record)
+
+    def _cleanup_llm(self, record: _LaunchRecord) -> None:
+        llm = record.llm
+        record.llm = None
+        del llm
+        gc.collect()
+        try:
+            import torch.cuda
+
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def stop_all(self) -> None:
         with self._lock:
@@ -339,161 +387,6 @@ class VLLMEnvironmentManager:
             nvidia_smi_error=nvidia_smi_error,
         )
 
-    def _build_command(
-        self,
-        *,
-        model: str,
-        port: int,
-        tensor_parallel_size: int,
-        extra_args: Sequence[str],
-    ) -> list[str]:
-        command = [
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
-            model,
-            "--host",
-            self._settings.launch_host,
-            "--port",
-            str(port),
-            "--tensor-parallel-size",
-            str(tensor_parallel_size),
-        ]
-        command.extend(extra_args)
-        return command
-
-    def _select_port(self, requested_port: int | None) -> int:
-        active_ports = {
-            record.port
-            for record in self._launches.values()
-            if record.state not in TERMINAL_STATES and record.process.poll() is None
-        }
-
-        if requested_port is not None:
-            if requested_port in active_ports or not self._is_bindable_port(
-                requested_port
-            ):
-                raise LaunchConflictError(f"Port {requested_port} is not available")
-            return requested_port
-
-        for port in range(
-            self._settings.launch_port_start, self._settings.launch_port_end + 1
-        ):
-            if port in active_ports:
-                continue
-            if self._is_bindable_port(port):
-                return port
-
-        raise LaunchConflictError(
-            f"No available ports in range {self._settings.launch_port_start}-{self._settings.launch_port_end}"
-        )
-
-    def _is_bindable_port(self, port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind((self._settings.launch_host, port))
-                return True
-            except OSError:
-                return False
-
-    def _refresh_record(self, record: _LaunchRecord) -> None:
-        return_code = record.process.poll()
-        if return_code is not None:
-            record.return_code = return_code
-            if record.state == LaunchState.STOPPING:
-                record.state = LaunchState.STOPPED
-            elif record.state != LaunchState.STOPPED:
-                record.state = LaunchState.FAILED
-                if record.error is None:
-                    record.error = f"vLLM exited with code {return_code}"
-            record.updated_at = time.time()
-            self._release_gpus(record)
-            return
-
-        if record.state == LaunchState.BOOTSTRAPPING and self._has_ready_marker(record):
-            record.state = LaunchState.READY
-            record.updated_at = time.time()
-
-    def _forward_process_output(self, source: IO[bytes], log_path: Path) -> None:
-        read_chunk = getattr(source, "read1", source.read)
-        try:
-            with log_path.open("ab", buffering=0) as log_file:
-                while True:
-                    chunk = read_chunk(_PROCESS_LOG_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    log_file.write(chunk)
-                    self._write_to_system_output(chunk)
-        finally:
-            source.close()
-
-    def _write_to_system_output(self, chunk: bytes) -> None:
-        with self._system_output_lock:
-            stdout_buffer = getattr(sys.stdout, "buffer", None)
-            if stdout_buffer is not None:
-                try:
-                    stdout_buffer.write(chunk)
-                    stdout_buffer.flush()
-                    return
-                except (BrokenPipeError, OSError, ValueError):
-                    return
-
-            try:
-                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
-                sys.stdout.flush()
-            except (BrokenPipeError, OSError, ValueError):
-                return
-
-    def _has_ready_marker(self, record: _LaunchRecord) -> bool:
-        if not record.log_path.exists():
-            return False
-
-        with record.log_path.open("rb") as log_file:
-            log_file.seek(record.ready_scan_offset)
-            chunk = log_file.read(self._settings.ready_scan_chunk_bytes)
-            record.ready_scan_offset = log_file.tell()
-
-        if not chunk:
-            return False
-
-        text = chunk.decode("utf-8", errors="replace")
-        combined = record.ready_scan_tail + text
-        marker_found = any(
-            marker in combined for marker in self._settings.ready_markers
-        )
-
-        tail_len = max(0, self._max_ready_marker_len - 1)
-        if tail_len:
-            record.ready_scan_tail = combined[-tail_len:]
-        else:
-            record.ready_scan_tail = ""
-
-        return marker_found
-
-    def _terminate_process(self, process: subprocess.Popen[bytes]) -> None:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-        try:
-            process.wait(timeout=self._settings.stop_timeout_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-
     def _resolve_gpu_ids(
         self, available_gpu_ids: Sequence[int], requested_gpu_ids: Sequence[int] | None
     ) -> list[int]:
@@ -524,7 +417,6 @@ class VLLMEnvironmentManager:
                 self._gpu_owners.pop(gpu_id, None)
                 continue
 
-            self._refresh_record(owner_record)
             if owner_record.state in TERMINAL_STATES:
                 self._gpu_owners.pop(gpu_id, None)
                 continue
@@ -687,6 +579,8 @@ class VLLMEnvironmentManager:
 
     def _collect_host_memory_stats_linux(self) -> tuple[int, int]:
         meminfo: dict[str, int] = {}
+        from pathlib import Path
+
         with Path("/proc/meminfo").open("r", encoding="utf-8") as meminfo_file:
             for raw_line in meminfo_file:
                 key, _, remainder = raw_line.partition(":")
@@ -760,10 +654,9 @@ class VLLMEnvironmentManager:
             launch_id=record.launch_id,
             model=record.model,
             gpu_ids=list(record.gpu_ids),
-            port=record.port,
+            task=record.task,
             state=record.state,
             created_at=record.created_at,
             updated_at=record.updated_at,
-            return_code=record.return_code,
             error=record.error,
         )
