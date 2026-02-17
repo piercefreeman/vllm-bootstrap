@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
 
@@ -131,6 +133,33 @@ class VLLMManager:
                     f"Launch {launch_id} not ready after {timeout}s (state={snapshot.state.value})"
                 )
             await asyncio.sleep(poll_interval)
+
+    # -- lifecycle helpers --
+
+    @asynccontextmanager
+    async def run(
+        self,
+        model: str,
+        *,
+        task: str = "generate",
+        gpu_ids: list[int] | None = None,
+        extra_kwargs: dict[str, Any] | None = None,
+        ready_timeout: float = 600,
+        ready_poll_interval: float = 2.0,
+    ) -> AsyncIterator[LaunchResponse]:
+        """Launch a model, wait until ready, yield, and stop on exit."""
+        snapshot = await self.launch(
+            model, task=task, gpu_ids=gpu_ids, extra_kwargs=extra_kwargs
+        )
+        try:
+            snapshot = await self.wait_until_ready(
+                snapshot.launch_id,
+                timeout=ready_timeout,
+                poll_interval=ready_poll_interval,
+            )
+            yield snapshot
+        finally:
+            await self.stop(snapshot.launch_id)
 
     # -- gRPC inference endpoints --
 
