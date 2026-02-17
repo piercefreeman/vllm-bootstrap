@@ -5,6 +5,7 @@ import binascii
 import secrets
 from collections.abc import Awaitable, Callable
 
+import grpc
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
@@ -66,3 +67,35 @@ def build_access_key_middleware(*, access_key_getter: AccessKeyGetter):
         return await call_next(request)
 
     return enforce_access_key
+
+
+def _abort_unauthenticated(request, context):
+    context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid or missing access key")
+
+
+class _AccessKeyInterceptor(grpc.ServerInterceptor):
+    def __init__(self, access_key_getter: AccessKeyGetter) -> None:
+        self._access_key_getter = access_key_getter
+
+    def intercept_service(self, continuation, handler_call_details):
+        configured_key = self._access_key_getter()
+        if not configured_key:
+            return continuation(handler_call_details)
+
+        metadata = dict(handler_call_details.invocation_metadata)
+        authorization = metadata.get("authorization")
+        provided_key = _extract_access_key(authorization)
+
+        if provided_key is None or not secrets.compare_digest(
+            provided_key, configured_key
+        ):
+            return grpc.unary_unary_rpc_method_handler(_abort_unauthenticated)
+
+        return continuation(handler_call_details)
+
+
+def build_access_key_interceptor(
+    *,
+    access_key_getter: AccessKeyGetter,
+) -> grpc.ServerInterceptor:
+    return _AccessKeyInterceptor(access_key_getter)

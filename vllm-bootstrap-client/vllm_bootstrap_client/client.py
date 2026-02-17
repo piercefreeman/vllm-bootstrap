@@ -56,6 +56,11 @@ class VLLMManager:
             return {"Authorization": f"Bearer {self._access_key}"}
         return {}
 
+    def _grpc_metadata(self) -> list[tuple[str, str]] | None:
+        if self._access_key:
+            return [("authorization", f"Bearer {self._access_key}")]
+        return None
+
     async def close(self) -> None:
         await self._http.aclose()
         await self._channel.close()
@@ -165,7 +170,8 @@ class VLLMManager:
 
     async def embed(self, launch_id: str, texts: list[str]) -> list[list[float]]:
         response = await self._stub.Embed(
-            inference_pb2.EmbedRequest(launch_id=launch_id, texts=texts)
+            inference_pb2.EmbedRequest(launch_id=launch_id, texts=texts),
+            metadata=self._grpc_metadata(),
         )
         return [list(e.values) for e in response.embeddings]
 
@@ -204,5 +210,8 @@ class VLLMManager:
         if gd_kwargs:
             kwargs["guided_decoding"] = inference_pb2.GuidedDecodingParams(**gd_kwargs)
 
-        response = await self._stub.Complete(inference_pb2.CompleteRequest(**kwargs))
+        response = await self._stub.Complete(
+            inference_pb2.CompleteRequest(**kwargs),
+            metadata=self._grpc_metadata(),
+        )
         return list(response.completions)

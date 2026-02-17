@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
+from vllm_bootstrap.auth import build_access_key_interceptor
 from vllm_bootstrap.config import Settings
 from vllm_bootstrap.generated import inference_pb2, inference_pb2_grpc
 from vllm_bootstrap.grpc_server import InferenceServicer
@@ -341,3 +342,138 @@ def test_complete_with_choice(grpc_channel) -> None:
     call_args = mock_llm.generate.call_args
     sampling_params = call_args[0][1]
     assert sampling_params.structured_outputs is not None
+
+
+# -- Auth interceptor tests --
+
+TEST_ACCESS_KEY = "test-secret-key-12345"
+
+
+@pytest.fixture
+def grpc_channel_with_auth(tmp_path):
+    """Create a gRPC server+channel pair with auth interceptor enabled."""
+    manager = _make_manager(tmp_path)
+    interceptor = build_access_key_interceptor(
+        access_key_getter=lambda: TEST_ACCESS_KEY,
+    )
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=2),
+        interceptors=[interceptor],
+    )
+    servicer = InferenceServicer(manager)
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(servicer, server)
+    port = server.add_insecure_port("[::]:0")
+    server.start()
+
+    channel = grpc.insecure_channel(f"localhost:{port}")
+    yield channel, manager
+    server.stop(grace=0)
+    channel.close()
+
+
+def test_auth_rejects_missing_metadata(grpc_channel_with_auth) -> None:
+    channel, manager = grpc_channel_with_auth
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_llm.embed.return_value = []
+    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        stub.Embed(inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]))
+    assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+def test_auth_rejects_wrong_key(grpc_channel_with_auth) -> None:
+    channel, manager = grpc_channel_with_auth
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_llm.embed.return_value = []
+    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        stub.Embed(
+            inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
+            metadata=[("authorization", "Bearer wrong-key")],
+        )
+    assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+def test_auth_accepts_valid_bearer_token(grpc_channel_with_auth) -> None:
+    channel, manager = grpc_channel_with_auth
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_output = MagicMock()
+    mock_output.outputs.embedding = [0.1, 0.2]
+    mock_llm.embed.return_value = [mock_output]
+    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+
+    response = stub.Embed(
+        inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
+        metadata=[("authorization", f"Bearer {TEST_ACCESS_KEY}")],
+    )
+    assert len(response.embeddings) == 1
+    assert list(response.embeddings[0].values) == pytest.approx([0.1, 0.2])
+
+
+def test_auth_accepts_valid_basic_auth(grpc_channel_with_auth) -> None:
+    import base64
+
+    channel, manager = grpc_channel_with_auth
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_output = MagicMock()
+    mock_output.outputs.embedding = [0.3, 0.4]
+    mock_llm.embed.return_value = [mock_output]
+    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+
+    basic_cred = base64.b64encode(f"user:{TEST_ACCESS_KEY}".encode()).decode()
+    response = stub.Embed(
+        inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
+        metadata=[("authorization", f"Basic {basic_cred}")],
+    )
+    assert len(response.embeddings) == 1
+    assert list(response.embeddings[0].values) == pytest.approx([0.3, 0.4])
+
+
+@pytest.fixture
+def grpc_channel_no_auth(tmp_path):
+    """Create a gRPC server+channel with auth interceptor but no key configured."""
+    manager = _make_manager(tmp_path)
+    interceptor = build_access_key_interceptor(
+        access_key_getter=lambda: None,
+    )
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=2),
+        interceptors=[interceptor],
+    )
+    servicer = InferenceServicer(manager)
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(servicer, server)
+    port = server.add_insecure_port("[::]:0")
+    server.start()
+
+    channel = grpc.insecure_channel(f"localhost:{port}")
+    yield channel, manager
+    server.stop(grace=0)
+    channel.close()
+
+
+def test_auth_passes_when_no_key_configured(grpc_channel_no_auth) -> None:
+    channel, manager = grpc_channel_no_auth
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_output = MagicMock()
+    mock_output.outputs.embedding = [0.5, 0.6]
+    mock_llm.embed.return_value = [mock_output]
+    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+
+    # No metadata at all — should pass through since no key is configured
+    response = stub.Embed(
+        inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
+    )
+    assert len(response.embeddings) == 1
+    assert list(response.embeddings[0].values) == pytest.approx([0.5, 0.6])

@@ -14,4 +14,4 @@ RUN pip install --no-cache-dir .
 EXPOSE 8000 8001
 
 ENTRYPOINT []
-CMD ["python", "-m", "vllm_bootstrap"]
+CMD ["python3", "-m", "vllm_bootstrap"]
