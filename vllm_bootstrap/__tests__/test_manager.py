@@ -387,3 +387,35 @@ def test_vllm_error_output_triggers_failed_state(
         assert "fake-model" in logs.content
     finally:
         manager.stop_all()
+
+
+def test_parse_gpu_stats_parses_real_nvidia_smi_query_output(
+    manager: VLLMEnvironmentManager,
+) -> None:
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_stats.txt")
+    parsed = manager._parse_gpu_stats(nvidia_smi_fixture)
+
+    assert len(parsed) == 2
+    assert parsed[0].gpu_id == 0
+    assert parsed[0].uuid == "GPU-1234abcd-0000-1111-2222-333344445555"
+    assert parsed[0].name == "NVIDIA H100 80GB HBM3"
+    assert parsed[0].utilization_percent == 81.0
+    assert parsed[0].memory_total_mib == 81559
+    assert parsed[0].memory_used_mib == 40960
+    assert parsed[0].temperature_c == 43
+    assert parsed[0].power_draw_watts == 251.37
+    assert parsed[0].power_limit_watts == 700.0
+
+
+def test_get_system_stats_handles_missing_nvidia_smi(
+    monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
+) -> None:
+    def _raise_file_not_found(*_a, **_kw):
+        raise FileNotFoundError("nvidia-smi not found")
+
+    monkeypatch.setattr(subprocess, "check_output", _raise_file_not_found)
+
+    stats = manager.get_system_stats()
+    assert stats.gpu_count == 0
+    assert stats.gpus == []
+    assert stats.nvidia_smi_error == "nvidia-smi is unavailable on this host."

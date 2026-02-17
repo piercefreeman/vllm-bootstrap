@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -49,6 +51,37 @@ class LogSnapshot:
 
 
 @dataclass(slots=True)
+class GPUStatsSnapshot:
+    gpu_id: int
+    uuid: str | None
+    name: str
+    utilization_percent: float | None
+    memory_total_mib: int | None
+    memory_used_mib: int | None
+    memory_free_mib: int | None
+    temperature_c: int | None
+    power_draw_watts: float | None
+    power_limit_watts: float | None
+
+
+@dataclass(slots=True)
+class SystemStatsSnapshot:
+    collected_at: float
+    load_avg_1m: float | None
+    load_avg_5m: float | None
+    load_avg_15m: float | None
+    cpu_count: int | None
+    memory_total_bytes: int | None
+    memory_available_bytes: int | None
+    memory_used_bytes: int | None
+    memory_utilization_percent: float | None
+    host_memory_error: str | None
+    gpu_count: int
+    gpus: list[GPUStatsSnapshot]
+    nvidia_smi_error: str | None
+
+
+@dataclass(slots=True)
 class _LaunchRecord:
     launch_id: str
     model: str
@@ -79,6 +112,26 @@ class LaunchConflictError(LaunchManagerError):
 
 class LaunchValidationError(LaunchManagerError):
     pass
+
+
+_NVIDIA_SMI_GPU_QUERY_FIELDS = (
+    "index",
+    "uuid",
+    "name",
+    "utilization.gpu",
+    "memory.total",
+    "memory.used",
+    "memory.free",
+    "temperature.gpu",
+    "power.draw",
+    "power.limit",
+)
+_NVIDIA_SMI_GPU_QUERY_COMMAND = [
+    "nvidia-smi",
+    f"--query-gpu={','.join(_NVIDIA_SMI_GPU_QUERY_FIELDS)}",
+    "--format=csv,noheader,nounits",
+]
+_NA_TOKENS = {"", "N/A", "[N/A]", "Not Supported", "[Not Supported]"}
 
 
 class VLLMEnvironmentManager:
@@ -235,6 +288,43 @@ class VLLMEnvironmentManager:
                 self.stop(launch_id)
             except LaunchManagerError:
                 continue
+
+    def get_system_stats(self) -> SystemStatsSnapshot:
+        collected_at = time.time()
+
+        load_avg_1m: float | None = None
+        load_avg_5m: float | None = None
+        load_avg_15m: float | None = None
+        try:
+            load_avg_1m, load_avg_5m, load_avg_15m = os.getloadavg()
+        except (AttributeError, OSError):
+            pass
+
+        cpu_count = os.cpu_count()
+        (
+            memory_total_bytes,
+            memory_available_bytes,
+            memory_used_bytes,
+            memory_utilization_percent,
+            host_memory_error,
+        ) = self._collect_host_memory_stats()
+        gpu_stats, nvidia_smi_error = self._collect_gpu_stats()
+
+        return SystemStatsSnapshot(
+            collected_at=collected_at,
+            load_avg_1m=load_avg_1m,
+            load_avg_5m=load_avg_5m,
+            load_avg_15m=load_avg_15m,
+            cpu_count=cpu_count,
+            memory_total_bytes=memory_total_bytes,
+            memory_available_bytes=memory_available_bytes,
+            memory_used_bytes=memory_used_bytes,
+            memory_utilization_percent=memory_utilization_percent,
+            host_memory_error=host_memory_error,
+            gpu_count=len(gpu_stats),
+            gpus=gpu_stats,
+            nvidia_smi_error=nvidia_smi_error,
+        )
 
     def _build_command(
         self,
@@ -461,6 +551,160 @@ class VLLMEnvironmentManager:
             raise LaunchValidationError(f"{source} did not contain any GPU ids")
 
         return sorted(set(gpu_ids))
+
+    def _collect_gpu_stats(self) -> tuple[list[GPUStatsSnapshot], str | None]:
+        try:
+            output = subprocess.check_output(
+                _NVIDIA_SMI_GPU_QUERY_COMMAND,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError:
+            return [], "nvidia-smi is unavailable on this host."
+        except subprocess.CalledProcessError as error:
+            message = error.output.strip() if error.output else str(error)
+            return [], f"Failed to query GPU stats from nvidia-smi: {message}"
+
+        gpu_stats = self._parse_gpu_stats(output)
+        if not gpu_stats and output.strip():
+            return [], "Could not parse GPU stats from nvidia-smi output."
+        return gpu_stats, None
+
+    def _parse_gpu_stats(self, raw: str) -> list[GPUStatsSnapshot]:
+        gpu_stats: list[GPUStatsSnapshot] = []
+        rows = csv.reader(raw.splitlines(), skipinitialspace=True)
+        for row in rows:
+            if len(row) < len(_NVIDIA_SMI_GPU_QUERY_FIELDS):
+                continue
+
+            gpu_id = self._parse_optional_int(row[0])
+            if gpu_id is None:
+                continue
+
+            gpu_stats.append(
+                GPUStatsSnapshot(
+                    gpu_id=gpu_id,
+                    uuid=row[1].strip() or None,
+                    name=row[2].strip() or "unknown",
+                    utilization_percent=self._parse_optional_float(row[3]),
+                    memory_total_mib=self._parse_optional_int(row[4]),
+                    memory_used_mib=self._parse_optional_int(row[5]),
+                    memory_free_mib=self._parse_optional_int(row[6]),
+                    temperature_c=self._parse_optional_int(row[7]),
+                    power_draw_watts=self._parse_optional_float(row[8]),
+                    power_limit_watts=self._parse_optional_float(row[9]),
+                )
+            )
+        return sorted(gpu_stats, key=lambda snapshot: snapshot.gpu_id)
+
+    def _collect_host_memory_stats(
+        self,
+    ) -> tuple[int | None, int | None, int | None, float | None, str | None]:
+        memory_total_bytes: int | None = None
+        memory_available_bytes: int | None = None
+        memory_error: str | None = None
+
+        if sys.platform.startswith("linux"):
+            try:
+                memory_total_bytes, memory_available_bytes = (
+                    self._collect_host_memory_stats_linux()
+                )
+            except (OSError, ValueError) as error:
+                memory_error = f"Failed to parse /proc/meminfo: {error}"
+
+        if memory_total_bytes is None:
+            try:
+                fallback_total, fallback_available = (
+                    self._collect_host_memory_stats_sysconf()
+                )
+                if fallback_total is not None:
+                    memory_total_bytes = fallback_total
+                if fallback_available is not None:
+                    memory_available_bytes = fallback_available
+            except (OSError, ValueError, AttributeError) as error:
+                if memory_error is None:
+                    memory_error = f"Failed to inspect host memory: {error}"
+
+        memory_used_bytes: int | None = None
+        memory_utilization_percent: float | None = None
+        if memory_total_bytes is not None and memory_available_bytes is not None:
+            memory_used_bytes = max(memory_total_bytes - memory_available_bytes, 0)
+            if memory_total_bytes > 0:
+                memory_utilization_percent = (
+                    memory_used_bytes / memory_total_bytes
+                ) * 100.0
+
+        return (
+            memory_total_bytes,
+            memory_available_bytes,
+            memory_used_bytes,
+            memory_utilization_percent,
+            memory_error,
+        )
+
+    def _collect_host_memory_stats_linux(self) -> tuple[int, int]:
+        meminfo: dict[str, int] = {}
+        with Path("/proc/meminfo").open("r", encoding="utf-8") as meminfo_file:
+            for raw_line in meminfo_file:
+                key, _, remainder = raw_line.partition(":")
+                if not remainder:
+                    continue
+                number_token = remainder.strip().split(maxsplit=1)[0]
+                try:
+                    value_kib = int(number_token)
+                except ValueError:
+                    continue
+                meminfo[key.strip()] = value_kib
+
+        total_kib = meminfo.get("MemTotal")
+        available_kib = meminfo.get("MemAvailable", meminfo.get("MemFree"))
+        if total_kib is None or available_kib is None:
+            raise ValueError("MemTotal or MemAvailable is missing")
+
+        return total_kib * 1024, available_kib * 1024
+
+    def _collect_host_memory_stats_sysconf(
+        self,
+    ) -> tuple[int | None, int | None]:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        total_pages = os.sysconf("SC_PHYS_PAGES")
+        if page_size == -1 or total_pages == -1:
+            return None, None
+
+        total_bytes = int(page_size) * int(total_pages)
+        available_bytes: int | None = None
+
+        try:
+            available_pages = os.sysconf("SC_AVPHYS_PAGES")
+        except (ValueError, OSError, AttributeError):
+            available_pages = -1
+
+        if available_pages != -1:
+            available_bytes = int(page_size) * int(available_pages)
+
+        return total_bytes, available_bytes
+
+    @staticmethod
+    def _parse_optional_int(token: str) -> int | None:
+        value = token.strip()
+        if value in _NA_TOKENS:
+            return None
+
+        match = re.search(r"-?\d+", value)
+        if match is None:
+            return None
+        return int(match.group())
+
+    @staticmethod
+    def _parse_optional_float(token: str) -> float | None:
+        value = token.strip()
+        if value in _NA_TOKENS:
+            return None
+
+        match = re.search(r"-?\d+(?:\.\d+)?", value)
+        if match is None:
+            return None
+        return float(match.group())
 
     def _require_record(self, launch_id: str) -> _LaunchRecord:
         record = self._launches.get(launch_id)

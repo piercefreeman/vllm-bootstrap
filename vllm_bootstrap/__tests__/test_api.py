@@ -6,12 +6,24 @@ import time
 from fastapi.testclient import TestClient
 
 import vllm_bootstrap.api as api_module
-from vllm_bootstrap.manager import LaunchNotFoundError, LaunchSnapshot, LaunchState
+from vllm_bootstrap.manager import (
+    GPUStatsSnapshot,
+    LaunchNotFoundError,
+    LaunchSnapshot,
+    LaunchState,
+    SystemStatsSnapshot,
+)
 
 
 class _StubManager:
-    def __init__(self, snapshots: list[LaunchSnapshot]) -> None:
+    def __init__(
+        self,
+        snapshots: list[LaunchSnapshot],
+        *,
+        system_stats: SystemStatsSnapshot | None = None,
+    ) -> None:
         self._snapshots = {snapshot.launch_id: snapshot for snapshot in snapshots}
+        self._system_stats = system_stats or _stats_snapshot()
 
     def list_launches(self, *, include_terminal: bool = False) -> list[LaunchSnapshot]:
         snapshots = list(self._snapshots.values())
@@ -32,6 +44,9 @@ class _StubManager:
     def stop_all(self) -> None:
         return
 
+    def get_system_stats(self) -> SystemStatsSnapshot:
+        return self._system_stats
+
 
 def _snapshot(
     *, launch_id: str, state: LaunchState, model: str = "model-a"
@@ -47,6 +62,43 @@ def _snapshot(
         updated_at=now,
         return_code=None,
         error=None,
+    )
+
+
+def _stats_snapshot(
+    *,
+    nvidia_smi_error: str | None = None,
+) -> SystemStatsSnapshot:
+    now = time.time()
+    return SystemStatsSnapshot(
+        collected_at=now,
+        load_avg_1m=0.7,
+        load_avg_5m=0.6,
+        load_avg_15m=0.5,
+        cpu_count=16,
+        memory_total_bytes=64_000_000_000,
+        memory_available_bytes=32_000_000_000,
+        memory_used_bytes=32_000_000_000,
+        memory_utilization_percent=50.0,
+        host_memory_error=None,
+        gpu_count=1 if nvidia_smi_error is None else 0,
+        gpus=[]
+        if nvidia_smi_error
+        else [
+            GPUStatsSnapshot(
+                gpu_id=0,
+                uuid="GPU-abc",
+                name="NVIDIA H100 80GB HBM3",
+                utilization_percent=76.0,
+                memory_total_mib=81559,
+                memory_used_mib=42000,
+                memory_free_mib=39559,
+                temperature_c=42,
+                power_draw_watts=248.5,
+                power_limit_watts=700.0,
+            )
+        ],
+        nvidia_smi_error=nvidia_smi_error,
     )
 
 
@@ -241,3 +293,48 @@ def test_proxy_to_vllm_returns_bad_gateway_for_upstream_error(monkeypatch) -> No
 
     assert response.status_code == 502
     assert "Failed to reach launch ready-2 upstream server" in response.json()["detail"]
+
+
+def test_stats_returns_host_and_gpu_metrics(monkeypatch) -> None:
+    monkeypatch.setattr(
+        api_module, "manager", _StubManager([], system_stats=_stats_snapshot())
+    )
+    monkeypatch.setattr(api_module.settings, "access_key", None)
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/stats")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["load_avg_1m"] == 0.7
+    assert payload["cpu_count"] == 16
+    assert payload["memory_total_bytes"] == 64_000_000_000
+    assert payload["memory_utilization_percent"] == 50.0
+    assert payload["gpu_count"] == 1
+    assert payload["gpus"][0]["gpu_id"] == 0
+    assert payload["gpus"][0]["memory_used_mib"] == 42000
+    assert payload["gpus"][0]["utilization_percent"] == 76.0
+    assert payload["nvidia_smi_error"] is None
+
+
+def test_stats_surfaces_nvidia_smi_error_without_failing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        api_module,
+        "manager",
+        _StubManager(
+            [],
+            system_stats=_stats_snapshot(
+                nvidia_smi_error="nvidia-smi is unavailable on this host."
+            ),
+        ),
+    )
+    monkeypatch.setattr(api_module.settings, "access_key", None)
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/stats")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["gpu_count"] == 0
+    assert payload["gpus"] == []
+    assert payload["nvidia_smi_error"] == "nvidia-smi is unavailable on this host."

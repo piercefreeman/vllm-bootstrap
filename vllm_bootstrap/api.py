@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+import logging
 from pathlib import Path
 
 import httpx
@@ -19,12 +20,13 @@ from .manager import (
     LaunchValidationError,
     VLLMEnvironmentManager,
 )
-from .models import LaunchRequest, LaunchResponse, LogsResponse
+from .models import LaunchRequest, LaunchResponse, LogsResponse, SystemStatsResponse
 
 
 settings = load_settings()
 manager = VLLMEnvironmentManager(settings=settings)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+logger = logging.getLogger(__name__)
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -198,3 +200,32 @@ def stop(launch_id: str) -> LaunchResponse:
     except LaunchManagerError as error:
         raise _to_http_error(error) from error
     return LaunchResponse.from_snapshot(snapshot)
+
+
+@app.get("/stats", response_model=SystemStatsResponse)
+def stats() -> SystemStatsResponse:
+    snapshot = manager.get_system_stats()
+
+    per_gpu_stats = ", ".join(
+        (
+            f"gpu={gpu_snapshot.gpu_id}:"
+            f"util={gpu_snapshot.utilization_percent}"
+            f" mem={gpu_snapshot.memory_used_mib}/{gpu_snapshot.memory_total_mib}MiB"
+        )
+        for gpu_snapshot in snapshot.gpus
+    )
+    logger.info(
+        "System stats snapshot load_1m=%s load_5m=%s load_15m=%s memory_utilization=%s gpu_count=%s %s",
+        snapshot.load_avg_1m,
+        snapshot.load_avg_5m,
+        snapshot.load_avg_15m,
+        snapshot.memory_utilization_percent,
+        snapshot.gpu_count,
+        per_gpu_stats,
+    )
+    if snapshot.nvidia_smi_error:
+        logger.warning("nvidia-smi stats unavailable: %s", snapshot.nvidia_smi_error)
+    if snapshot.host_memory_error:
+        logger.warning("host memory stats unavailable: %s", snapshot.host_memory_error)
+
+    return SystemStatsResponse.from_snapshot(snapshot)

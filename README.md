@@ -21,6 +21,9 @@ If you're interested in a step by step guide for Runpod, check [this out](./docs
   - Returns log chunk and next offset for incremental log streaming.
 - `POST /stop/{launch_id}`
   - Stops the managed launch and releases its GPU ownership.
+- `GET /stats`
+  - Returns host load averages, CPU count, host memory usage, and per-GPU utilization/memory/power stats.
+  - Uses `nvidia-smi` for GPU metrics and includes an error field if GPU stats are unavailable.
 - `ANY /proxy/{launch_id}/{upstream_path}`
   - Reverse proxies requests to the launched vLLM server for that `launch_id`.
   - Requires the launch to be in `ready` state; returns `409` otherwise.
