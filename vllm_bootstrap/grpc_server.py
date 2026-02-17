@@ -81,6 +81,13 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             )
             return inference_pb2.CompleteResponse()
 
+        prompts = list(request.prompts)
+        if not prompts:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("prompts must not be empty")
+            return inference_pb2.CompleteResponse()
+
+        from vllm import GuidedDecodingParams as VLLMGuidedDecodingParams
         from vllm import SamplingParams
 
         kwargs: dict = {}
@@ -91,25 +98,42 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
         if request.HasField("top_p"):
             kwargs["top_p"] = request.top_p
 
+        if request.HasField("guided_decoding"):
+            gd = request.guided_decoding
+            gd_kwargs: dict = {}
+            if gd.choice:
+                gd_kwargs["choice"] = list(gd.choice)
+            else:
+                oneof_field = gd.WhichOneof("kind")
+                if oneof_field == "json_schema":
+                    gd_kwargs["json"] = gd.json_schema
+                elif oneof_field == "regex":
+                    gd_kwargs["regex"] = gd.regex
+                elif oneof_field == "grammar":
+                    gd_kwargs["grammar"] = gd.grammar
+            if gd_kwargs:
+                kwargs["guided_decoding"] = VLLMGuidedDecodingParams(**gd_kwargs)
+
         sampling_params = SamplingParams(**kwargs)
 
         try:
-            outputs = llm.generate([request.prompt], sampling_params)
+            outputs = llm.generate(prompts, sampling_params)
         except Exception as exc:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Generation failed: {exc}")
             return inference_pb2.CompleteResponse()
 
-        output = outputs[0]
-        generated_text = output.outputs[0].text
-        prompt_tokens = len(output.prompt_token_ids)
-        completion_tokens = len(output.outputs[0].token_ids)
+        completions = []
+        for output in outputs:
+            completions.append(
+                inference_pb2.Completion(
+                    text=output.outputs[0].text,
+                    prompt_tokens=len(output.prompt_token_ids),
+                    completion_tokens=len(output.outputs[0].token_ids),
+                )
+            )
 
-        return inference_pb2.CompleteResponse(
-            text=generated_text,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
+        return inference_pb2.CompleteResponse(completions=completions)
 
 
 def create_grpc_server(manager: VLLMEnvironmentManager, port: int) -> grpc.Server:

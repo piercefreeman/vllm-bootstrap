@@ -56,6 +56,7 @@ def _fake_vllm():
     """Install a fake vllm module so gRPC servicer can import SamplingParams."""
     fake_vllm = types.ModuleType("vllm")
     fake_vllm.SamplingParams = lambda **kwargs: MagicMock(**kwargs)
+    fake_vllm.GuidedDecodingParams = lambda **kwargs: MagicMock(**kwargs)
     fake_vllm.LLM = MagicMock()
     old = sys.modules.get("vllm")
     sys.modules["vllm"] = fake_vllm
@@ -126,29 +127,88 @@ def test_embed_returns_not_found(grpc_channel) -> None:
     assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND
 
 
+def _make_mock_completion(text: str, prompt_token_ids: list, token_ids: list):
+    """Helper to create a mock vLLM completion output."""
+    mock = MagicMock()
+    mock.outputs[0].text = text
+    mock.prompt_token_ids = prompt_token_ids
+    mock.outputs[0].token_ids = token_ids
+    return mock
+
+
 def test_complete_returns_text(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
     mock_llm = MagicMock()
-    mock_completion = MagicMock()
-    mock_completion.outputs[0].text = "Hello world!"
-    mock_completion.prompt_token_ids = [1, 2, 3]
-    mock_completion.outputs[0].token_ids = [4, 5]
-    mock_llm.generate.return_value = [mock_completion]
+    mock_llm.generate.return_value = [
+        _make_mock_completion("Hello world!", [1, 2, 3], [4, 5]),
+    ]
 
     _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
 
     response = stub.Complete(
         inference_pb2.CompleteRequest(
             launch_id="gen-1",
-            prompt="Say hello",
+            prompts=["Say hello"],
             max_tokens=100,
         )
     )
-    assert response.text == "Hello world!"
-    assert response.prompt_tokens == 3
-    assert response.completion_tokens == 2
+    assert len(response.completions) == 1
+    assert response.completions[0].text == "Hello world!"
+    assert response.completions[0].prompt_tokens == 3
+    assert response.completions[0].completion_tokens == 2
+
+
+def test_complete_batch(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_llm.generate.return_value = [
+        _make_mock_completion("Hello!", [1, 2], [3, 4]),
+        _make_mock_completion("Goodbye!", [5, 6, 7], [8]),
+    ]
+
+    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
+
+    response = stub.Complete(
+        inference_pb2.CompleteRequest(
+            launch_id="gen-1",
+            prompts=["Say hello", "Say goodbye"],
+            max_tokens=100,
+        )
+    )
+    assert len(response.completions) == 2
+    assert response.completions[0].text == "Hello!"
+    assert response.completions[0].prompt_tokens == 2
+    assert response.completions[0].completion_tokens == 2
+    assert response.completions[1].text == "Goodbye!"
+    assert response.completions[1].prompt_tokens == 3
+    assert response.completions[1].completion_tokens == 1
+
+    mock_llm.generate.assert_called_once()
+    call_args = mock_llm.generate.call_args
+    assert call_args[0][0] == ["Say hello", "Say goodbye"]
+
+
+def test_complete_rejects_empty_prompts(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        stub.Complete(
+            inference_pb2.CompleteRequest(
+                launch_id="gen-1",
+                prompts=[],
+                max_tokens=100,
+            )
+        )
+    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert "prompts must not be empty" in exc_info.value.details()
 
 
 def test_complete_rejects_embed_task(grpc_channel) -> None:
@@ -162,7 +222,7 @@ def test_complete_rejects_embed_task(grpc_channel) -> None:
         stub.Complete(
             inference_pb2.CompleteRequest(
                 launch_id="embed-1",
-                prompt="Say hello",
+                prompts=["Say hello"],
                 max_tokens=100,
             )
         )
@@ -178,8 +238,96 @@ def test_complete_returns_not_found(grpc_channel) -> None:
         stub.Complete(
             inference_pb2.CompleteRequest(
                 launch_id="missing",
-                prompt="hello",
+                prompts=["hello"],
                 max_tokens=10,
             )
         )
     assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+def test_complete_with_json_schema(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_llm.generate.return_value = [
+        _make_mock_completion('{"name": "Alice"}', [1, 2], [3, 4, 5]),
+    ]
+
+    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
+
+    schema = '{"type": "object", "properties": {"name": {"type": "string"}}}'
+    response = stub.Complete(
+        inference_pb2.CompleteRequest(
+            launch_id="gen-1",
+            prompts=["Generate a person"],
+            max_tokens=100,
+            guided_decoding=inference_pb2.GuidedDecodingParams(
+                json_schema=schema,
+            ),
+        )
+    )
+    assert len(response.completions) == 1
+    assert response.completions[0].text == '{"name": "Alice"}'
+
+    call_args = mock_llm.generate.call_args
+    sampling_params = call_args[0][1]
+    assert sampling_params.guided_decoding is not None
+
+
+def test_complete_with_regex(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_llm.generate.return_value = [
+        _make_mock_completion("42", [1], [2, 3]),
+    ]
+
+    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
+
+    response = stub.Complete(
+        inference_pb2.CompleteRequest(
+            launch_id="gen-1",
+            prompts=["Give me a number"],
+            max_tokens=10,
+            guided_decoding=inference_pb2.GuidedDecodingParams(
+                regex=r"\d+",
+            ),
+        )
+    )
+    assert len(response.completions) == 1
+    assert response.completions[0].text == "42"
+
+    call_args = mock_llm.generate.call_args
+    sampling_params = call_args[0][1]
+    assert sampling_params.guided_decoding is not None
+
+
+def test_complete_with_choice(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    mock_llm = MagicMock()
+    mock_llm.generate.return_value = [
+        _make_mock_completion("yes", [1, 2], [3]),
+    ]
+
+    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
+
+    response = stub.Complete(
+        inference_pb2.CompleteRequest(
+            launch_id="gen-1",
+            prompts=["Is this good?"],
+            max_tokens=10,
+            guided_decoding=inference_pb2.GuidedDecodingParams(
+                choice=["yes", "no"],
+            ),
+        )
+    )
+    assert len(response.completions) == 1
+    assert response.completions[0].text == "yes"
+
+    call_args = mock_llm.generate.call_args
+    sampling_params = call_args[0][1]
+    assert sampling_params.guided_decoding is not None

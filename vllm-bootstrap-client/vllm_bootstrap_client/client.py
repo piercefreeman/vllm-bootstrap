@@ -172,19 +172,37 @@ class VLLMManager:
     async def complete(
         self,
         launch_id: str,
-        prompt: str,
+        prompts: list[str],
         max_tokens: int,
         *,
         temperature: float | None = None,
         top_p: float | None = None,
-    ) -> inference_pb2.CompleteResponse:
+        json_schema: str | None = None,
+        regex: str | None = None,
+        grammar: str | None = None,
+        choice: list[str] | None = None,
+    ) -> list[inference_pb2.Completion]:
         kwargs: dict[str, Any] = {
             "launch_id": launch_id,
-            "prompt": prompt,
+            "prompts": prompts,
             "max_tokens": max_tokens,
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
         if top_p is not None:
             kwargs["top_p"] = top_p
-        return await self._stub.Complete(inference_pb2.CompleteRequest(**kwargs))
+
+        gd_kwargs: dict[str, Any] = {}
+        if json_schema is not None:
+            gd_kwargs["json_schema"] = json_schema
+        if regex is not None:
+            gd_kwargs["regex"] = regex
+        if grammar is not None:
+            gd_kwargs["grammar"] = grammar
+        if choice is not None:
+            gd_kwargs["choice"] = choice
+        if gd_kwargs:
+            kwargs["guided_decoding"] = inference_pb2.GuidedDecodingParams(**gd_kwargs)
+
+        response = await self._stub.Complete(inference_pb2.CompleteRequest(**kwargs))
+        return list(response.completions)
