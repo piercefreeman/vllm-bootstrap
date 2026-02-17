@@ -1,17 +1,18 @@
 # vllm-bootstrap
 
-Self contained docker image to treat a remote server (Runpod, GCP, AWS) as a generic endpoint for speeding up batch inference compute. Deploy the docker image to your remote server and dynamically update the model it's serving, get vllm bootstrap status, issue jobs, etc. 
+Self contained docker image to treat a remote server (Runpod, GCP, AWS) as a generic endpoint for speeding up batch inference compute. Deploy the docker image to your remote server and dynamically update the model it's serving, get vllm bootstrap status, issue jobs, etc.
 
-Internally we implement this logic through a FastAPI control plane for launching and managing vLLM servers with explicit GPU ownership.
+Internally we implement this logic through a FastAPI control plane for managing in-process vLLM instances with explicit GPU ownership, and a gRPC server for inference (embeddings and completions).
 
 If you're interested in a step by step guide for Runpod, check [this out](./docs/RUNPOD.md).
 
-## API
+## REST API (port 8000)
+
+Management endpoints for launching, monitoring, and stopping models.
 
 - `POST /launch`
-  - Launches `vllm.entrypoints.openai.api_server`.
-  - Requires a `model` to be provided in request body.
-  - Defaults to launching on all detected GPUs.
+  - Loads a model in-process via `vllm.LLM`.
+  - Requires `model` in request body. Optional `task` (`"generate"` or `"embed"`, default `"generate"`), `gpu_ids`, and `extra_kwargs`.
   - Returns `409` if requested/default GPUs are already owned by an active launch.
 - `GET /launch`
   - Returns active (non-terminal) launches and their metadata.
@@ -23,11 +24,72 @@ If you're interested in a step by step guide for Runpod, check [this out](./docs
   - Stops the managed launch and releases its GPU ownership.
 - `GET /stats`
   - Returns host load averages, CPU count, host memory usage, and per-GPU utilization/memory/power stats.
-  - Uses `nvidia-smi` for GPU metrics and includes an error field if GPU stats are unavailable.
-- `ANY /proxy/{launch_id}/{upstream_path}`
-  - Reverse proxies requests to the launched vLLM server for that `launch_id`.
-  - Requires the launch to be in `ready` state; returns `409` otherwise.
-  - For compatibility with OpenAI-style clients, payloads are passed through without strict request-body schema validation.
+
+## gRPC API (port 8001)
+
+Inference endpoints for embeddings and completions. Defined in [`proto/inference.proto`](proto/inference.proto).
+
+- `InferenceService.Embed(EmbedRequest) → EmbedResponse` — compute embeddings for a list of texts.
+- `InferenceService.Complete(CompleteRequest) → CompleteResponse` — generate a text completion.
+
+Both RPCs require a `launch_id` referencing a model in `ready` state. Task must match the launch (`embed` or `generate`).
+
+## Client library
+
+Install the client:
+
+```bash
+pip install vllm-bootstrap-client
+```
+
+`VLLMManager` provides an async, Pydantic-first interface for both management (REST/httpx) and inference (gRPC). It derives the gRPC address automatically from the base URL (port + 1), or you can pass `grpc_address` explicitly.
+
+```python
+from vllm_bootstrap_client import VLLMManager
+
+async with VLLMManager("http://your-server:8000") as manager:
+    ...
+```
+
+### Launch a model
+
+```python
+launch = await manager.launch("meta-llama/Llama-3.1-8B-Instruct", task="generate")
+ready = await manager.wait_until_ready(launch.launch_id, timeout=300)
+```
+
+### Embeddings
+
+```python
+launch = await manager.launch("BAAI/bge-base-en-v1.5", task="embed")
+await manager.wait_until_ready(launch.launch_id, timeout=300)
+
+vectors = await manager.embed(launch.launch_id, ["Hello world", "Another sentence"])
+# vectors: list[list[float]]
+```
+
+### Completions
+
+```python
+result = await manager.complete(
+    launch.launch_id,
+    prompt="Once upon a time",
+    max_tokens=128,
+    temperature=0.7,
+)
+print(result.text)
+print(f"Tokens: {result.prompt_tokens} prompt, {result.completion_tokens} completion")
+```
+
+### Other operations
+
+```python
+await manager.status(launch.launch_id)    # LaunchResponse
+await manager.list_launches()             # list[LaunchResponse]
+await manager.logs(launch.launch_id)      # LogsResponse
+await manager.stats()                     # SystemStatsResponse
+await manager.stop(launch.launch_id)      # LaunchResponse
+```
 
 ## Run locally
 
@@ -46,7 +108,15 @@ Example launch request:
 ```bash
 curl -X POST http://localhost:8000/launch \
   -H "content-type: application/json" \
-  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct"}'
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct", "task":"generate"}'
+```
+
+Launch an embedding model:
+
+```bash
+curl -X POST http://localhost:8000/launch \
+  -H "content-type: application/json" \
+  -d '{"model":"BAAI/bge-base-en-v1.5", "task":"embed"}'
 ```
 
 Tail logs:
@@ -78,13 +148,13 @@ Run:
 docker run --rm -p 8000:8000 -p 8001:8001 vllm-bootstrap:cuda12.4-local
 ```
 
-Port 8000 serves the bootstrap control plane API, and port 8001 is the gRPC service.
+Port 8000 serves the REST control plane, and port 8001 is the gRPC inference service.
 
 ## Key environment variables
 
-- `VLLM_LAUNCH_PORT_START` / `VLLM_LAUNCH_PORT_END` port range for vLLM child processes.
-- `VLLM_BOOTSTRAP_LOG_DIR` log directory for child process output.
-- `VLLM_ACCESS_KEY` optional shared key that protects all routes.
+- `VLLM_GRPC_PORT` gRPC server port (default `8001`).
+- `VLLM_BOOTSTRAP_LOG_DIR` log directory.
+- `VLLM_ACCESS_KEY` optional shared key that protects REST routes.
   - `Authorization: Bearer <key>` is accepted.
   - If no auth header is sent, the server returns `401` with a `WWW-Authenticate: Basic` challenge.
   - HTTP Basic auth is accepted with any username and `<key>` as password.
@@ -94,7 +164,7 @@ GPU ownership and default allocation are auto-detected from host hardware via `n
 ## Tests
 
 ```bash
-PYTHONPATH=. uv run --no-project --with pytest --with fastapi --with jinja2 --with pydantic-settings --with httpx pytest -q
+make test
 ```
 
 ## Local validation

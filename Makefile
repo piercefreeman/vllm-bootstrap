@@ -1,4 +1,4 @@
-.PHONY: lint lint-verify test validate generate-proto
+.PHONY: lint lint-verify test validate generate-proto generate-client
 
 lint:
 	uv run --no-project --with ruff ruff check . --fix
@@ -15,6 +15,7 @@ validate: lint-verify test
 
 SERVER_OUT = vllm_bootstrap/generated
 CLIENT_OUT = vllm-bootstrap-client/vllm_bootstrap_client/generated
+CLIENT_MODELS = vllm-bootstrap-client/vllm_bootstrap_client/models.py
 
 generate-proto:
 	mkdir -p $(SERVER_OUT) $(CLIENT_OUT)
@@ -31,3 +32,16 @@ generate-proto:
 		--grpc_python_out=$(CLIENT_OUT) \
 		proto/inference.proto
 	touch $(SERVER_OUT)/__init__.py $(CLIENT_OUT)/__init__.py
+
+generate-client-models:
+	PYTHONPATH=. uv run python -c \
+		"import json; from vllm_bootstrap.api import app; print(json.dumps(app.openapi()))" \
+		> /tmp/vllm-bootstrap-openapi.json
+	uv run datamodel-codegen \
+		--input /tmp/vllm-bootstrap-openapi.json \
+		--input-file-type openapi \
+		--output $(CLIENT_MODELS) \
+		--output-model-type pydantic_v2.BaseModel \
+		--target-python-version 3.11
+
+generate-client: generate-proto generate-client-models
