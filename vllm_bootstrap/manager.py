@@ -13,9 +13,11 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
+from typing import IO, Sequence
 
 from .config import Settings
+
+_PROCESS_LOG_CHUNK_BYTES = 8192
 
 
 class LaunchState(str, Enum):
@@ -139,6 +141,7 @@ class VLLMEnvironmentManager:
         self._settings = settings
         self._settings.log_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._system_output_lock = threading.Lock()
         self._launches: dict[str, _LaunchRecord] = {}
         self._gpu_owners: dict[int, str] = {}
         self._max_ready_marker_len = max(
@@ -171,19 +174,29 @@ class VLLMEnvironmentManager:
                 tensor_parallel_size=len(selected_gpu_ids),
                 extra_args=extra_args,
             )
+            log_path.touch(exist_ok=True)
             environment = os.environ.copy()
             environment["CUDA_VISIBLE_DEVICES"] = ",".join(
                 str(gpu_id) for gpu_id in selected_gpu_ids
             )
 
-            with log_path.open("ab") as log_file:
-                process = subprocess.Popen(
-                    command,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    env=environment,
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=environment,
+            )
+            if process.stdout is None:
+                raise LaunchManagerError(
+                    "Failed to capture vLLM process output stream."
                 )
+            threading.Thread(
+                target=self._forward_process_output,
+                args=(process.stdout, log_path),
+                daemon=True,
+                name=f"vllm-log-forwarder-{launch_id}",
+            ).start()
 
             created_at = time.time()
             record = _LaunchRecord(
@@ -402,6 +415,36 @@ class VLLMEnvironmentManager:
         if record.state == LaunchState.BOOTSTRAPPING and self._has_ready_marker(record):
             record.state = LaunchState.READY
             record.updated_at = time.time()
+
+    def _forward_process_output(self, source: IO[bytes], log_path: Path) -> None:
+        read_chunk = getattr(source, "read1", source.read)
+        try:
+            with log_path.open("ab", buffering=0) as log_file:
+                while True:
+                    chunk = read_chunk(_PROCESS_LOG_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    log_file.write(chunk)
+                    self._write_to_system_output(chunk)
+        finally:
+            source.close()
+
+    def _write_to_system_output(self, chunk: bytes) -> None:
+        with self._system_output_lock:
+            stdout_buffer = getattr(sys.stdout, "buffer", None)
+            if stdout_buffer is not None:
+                try:
+                    stdout_buffer.write(chunk)
+                    stdout_buffer.flush()
+                    return
+                except (BrokenPipeError, OSError, ValueError):
+                    return
+
+            try:
+                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                return
 
     def _has_ready_marker(self, record: _LaunchRecord) -> bool:
         if not record.log_path.exists():
