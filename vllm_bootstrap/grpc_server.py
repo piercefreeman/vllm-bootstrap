@@ -5,6 +5,7 @@ from concurrent import futures
 
 import grpc
 
+from .auth import AccessKeyGetter, build_access_key_interceptor
 from .generated import inference_pb2, inference_pb2_grpc
 from .manager import (
     LaunchConflictError,
@@ -136,8 +137,22 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
         return inference_pb2.CompleteResponse(completions=completions)
 
 
-def create_grpc_server(manager: VLLMEnvironmentManager, port: int) -> grpc.Server:
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+def create_grpc_server(
+    manager: VLLMEnvironmentManager,
+    port: int,
+    *,
+    access_key_getter: AccessKeyGetter | None = None,
+) -> grpc.Server:
+    interceptors = []
+    if access_key_getter is not None:
+        interceptors.append(
+            build_access_key_interceptor(access_key_getter=access_key_getter)
+        )
+
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        interceptors=interceptors,
+    )
     servicer = InferenceServicer(manager)
     inference_pb2_grpc.add_InferenceServiceServicer_to_server(servicer, server)
     server.add_insecure_port(f"[::]:{port}")

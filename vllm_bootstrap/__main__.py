@@ -15,7 +15,11 @@ def main() -> None:
     host = os.getenv("VLLM_BOOTSTRAP_HOST", "0.0.0.0")
     port = int(os.getenv("VLLM_BOOTSTRAP_PORT", "8000"))
 
-    grpc_server = create_grpc_server(manager, settings.grpc_port)
+    grpc_server = create_grpc_server(
+        manager,
+        settings.grpc_port,
+        access_key_getter=lambda: settings.access_key,
+    )
     grpc_server.start()
     logger.info("gRPC server started on port %d", settings.grpc_port)
 
