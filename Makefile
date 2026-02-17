@@ -32,6 +32,8 @@ generate-proto:
 		--grpc_python_out=$(CLIENT_OUT) \
 		proto/inference.proto
 	touch $(SERVER_OUT)/__init__.py $(CLIENT_OUT)/__init__.py
+	# Fix absolute imports in generated gRPC files to use relative imports
+	sed -i '' 's/^import inference_pb2 as/from . import inference_pb2 as/' $(SERVER_OUT)/inference_pb2_grpc.py $(CLIENT_OUT)/inference_pb2_grpc.py
 
 generate-client-models:
 	PYTHONPATH=. uv run python -c \
