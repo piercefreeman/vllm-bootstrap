@@ -4,7 +4,13 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
-from .manager import LaunchSnapshot, LaunchState, LogSnapshot
+from .manager import (
+    GPUStatsSnapshot,
+    LaunchSnapshot,
+    LaunchState,
+    LogSnapshot,
+    SystemStatsSnapshot,
+)
 
 
 def _as_datetime(timestamp: float) -> datetime:
@@ -71,4 +77,69 @@ class LogsResponse(BaseModel):
             offset=snapshot.offset,
             next_offset=snapshot.next_offset,
             content=snapshot.content,
+        )
+
+
+class GPUStatsResponse(BaseModel):
+    gpu_id: int
+    uuid: str | None = None
+    name: str
+    utilization_percent: float | None = None
+    memory_total_mib: int | None = None
+    memory_used_mib: int | None = None
+    memory_free_mib: int | None = None
+    temperature_c: int | None = None
+    power_draw_watts: float | None = None
+    power_limit_watts: float | None = None
+
+    @classmethod
+    def from_snapshot(cls, snapshot: GPUStatsSnapshot) -> "GPUStatsResponse":
+        return cls(
+            gpu_id=snapshot.gpu_id,
+            uuid=snapshot.uuid,
+            name=snapshot.name,
+            utilization_percent=snapshot.utilization_percent,
+            memory_total_mib=snapshot.memory_total_mib,
+            memory_used_mib=snapshot.memory_used_mib,
+            memory_free_mib=snapshot.memory_free_mib,
+            temperature_c=snapshot.temperature_c,
+            power_draw_watts=snapshot.power_draw_watts,
+            power_limit_watts=snapshot.power_limit_watts,
+        )
+
+
+class SystemStatsResponse(BaseModel):
+    collected_at: datetime
+    load_avg_1m: float | None = None
+    load_avg_5m: float | None = None
+    load_avg_15m: float | None = None
+    cpu_count: int | None = None
+    memory_total_bytes: int | None = None
+    memory_available_bytes: int | None = None
+    memory_used_bytes: int | None = None
+    memory_utilization_percent: float | None = None
+    host_memory_error: str | None = None
+    gpu_count: int
+    gpus: list[GPUStatsResponse]
+    nvidia_smi_error: str | None = None
+
+    @classmethod
+    def from_snapshot(cls, snapshot: SystemStatsSnapshot) -> "SystemStatsResponse":
+        return cls(
+            collected_at=_as_datetime(snapshot.collected_at),
+            load_avg_1m=snapshot.load_avg_1m,
+            load_avg_5m=snapshot.load_avg_5m,
+            load_avg_15m=snapshot.load_avg_15m,
+            cpu_count=snapshot.cpu_count,
+            memory_total_bytes=snapshot.memory_total_bytes,
+            memory_available_bytes=snapshot.memory_available_bytes,
+            memory_used_bytes=snapshot.memory_used_bytes,
+            memory_utilization_percent=snapshot.memory_utilization_percent,
+            host_memory_error=snapshot.host_memory_error,
+            gpu_count=snapshot.gpu_count,
+            gpus=[
+                GPUStatsResponse.from_snapshot(gpu_snapshot)
+                for gpu_snapshot in snapshot.gpus
+            ],
+            nvidia_smi_error=snapshot.nvidia_smi_error,
         )
