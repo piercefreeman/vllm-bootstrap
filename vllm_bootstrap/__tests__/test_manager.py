@@ -174,6 +174,44 @@ def test_logs_follow_offset(
     assert second_chunk.content == ""
 
 
+def test_logs_mirrored_to_standard_output(
+    monkeypatch: pytest.MonkeyPatch,
+    manager: VLLMEnvironmentManager,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
+    mirrored_line = "line-from-child-process"
+    monkeypatch.setattr(
+        manager,
+        "_build_command",
+        lambda **_: _fake_server_command(extra_lines=[mirrored_line]),
+    )
+
+    launch = manager.launch(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        gpu_ids=None,
+        port=None,
+        extra_args=[],
+    )
+
+    captured_stdout = ""
+
+    def _has_mirrored_stdout() -> bool:
+        nonlocal captured_stdout
+        captured_stdout += capfd.readouterr().out
+        return mirrored_line in captured_stdout
+
+    _wait_until(_has_mirrored_stdout)
+
+    logs = manager.read_logs(launch.launch_id, 0)
+    assert mirrored_line in logs.content
+    assert mirrored_line in captured_stdout
+
+
 def test_list_launches_filters_terminal_states(
     monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
 ) -> None:
