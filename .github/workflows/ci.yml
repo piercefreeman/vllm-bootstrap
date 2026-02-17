@@ -42,6 +42,32 @@ jobs:
         env:
           UV_PYTHON: "3.12"
 
+  vllm-compat:
+    runs-on: ubuntu-latest
+    needs: validation
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm-version: ["0.8.0", "0.9.0", "0.10.0", "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Run vllm compatibility tests
+        run: |
+          PYTHONPATH=. uv run --no-project \
+            --with pytest \
+            --with "vllm==${{ matrix.vllm-version }}" \
+            pytest -q vllm_bootstrap/__tests__/test_vllm_compat.py
+        env:
+          UV_PYTHON: "3.12"
+
   docker:
     runs-on: ubuntu-latest
     needs: [validation, tests]

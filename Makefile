@@ -1,4 +1,4 @@
-.PHONY: lint lint-verify test validate generate-proto generate-client
+.PHONY: lint lint-verify test test-vllm-compat validate generate-proto generate-client
 
 lint:
 	uv run --no-project --with ruff ruff check . --fix
@@ -10,6 +10,9 @@ lint-verify:
 
 test:
 	PYTHONPATH=. uv run --no-project --with pytest --with fastapi --with jinja2 --with pydantic-settings --with httpx --with grpcio --with grpcio-tools --with protobuf pytest -q
+
+test-vllm-compat:
+	PYTHONPATH=. uv run --no-project --with pytest --with vllm pytest -q vllm_bootstrap/__tests__/test_vllm_compat.py
 
 validate: lint-verify test
 
