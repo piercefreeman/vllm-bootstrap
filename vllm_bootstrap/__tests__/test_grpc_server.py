@@ -53,18 +53,28 @@ def _inject_ready_launch(
 
 @pytest.fixture(autouse=True)
 def _fake_vllm():
-    """Install a fake vllm module so gRPC servicer can import SamplingParams."""
+    """Install a fake vllm module so gRPC servicer can import from vllm."""
     fake_vllm = types.ModuleType("vllm")
     fake_vllm.SamplingParams = lambda **kwargs: MagicMock(**kwargs)
-    fake_vllm.GuidedDecodingParams = lambda **kwargs: MagicMock(**kwargs)
     fake_vllm.LLM = MagicMock()
-    old = sys.modules.get("vllm")
+
+    fake_sampling_params = types.ModuleType("vllm.sampling_params")
+    fake_sampling_params.StructuredOutputsParams = lambda **kwargs: MagicMock(**kwargs)
+    fake_vllm.sampling_params = fake_sampling_params
+
+    old_vllm = sys.modules.get("vllm")
+    old_sp = sys.modules.get("vllm.sampling_params")
     sys.modules["vllm"] = fake_vllm
+    sys.modules["vllm.sampling_params"] = fake_sampling_params
     yield
-    if old is None:
+    if old_vllm is None:
         sys.modules.pop("vllm", None)
     else:
-        sys.modules["vllm"] = old
+        sys.modules["vllm"] = old_vllm
+    if old_sp is None:
+        sys.modules.pop("vllm.sampling_params", None)
+    else:
+        sys.modules["vllm.sampling_params"] = old_sp
 
 
 @pytest.fixture
@@ -272,7 +282,7 @@ def test_complete_with_json_schema(grpc_channel) -> None:
 
     call_args = mock_llm.generate.call_args
     sampling_params = call_args[0][1]
-    assert sampling_params.guided_decoding is not None
+    assert sampling_params.structured_outputs is not None
 
 
 def test_complete_with_regex(grpc_channel) -> None:
@@ -301,7 +311,7 @@ def test_complete_with_regex(grpc_channel) -> None:
 
     call_args = mock_llm.generate.call_args
     sampling_params = call_args[0][1]
-    assert sampling_params.guided_decoding is not None
+    assert sampling_params.structured_outputs is not None
 
 
 def test_complete_with_choice(grpc_channel) -> None:
@@ -330,4 +340,4 @@ def test_complete_with_choice(grpc_channel) -> None:
 
     call_args = mock_llm.generate.call_args
     sampling_params = call_args[0][1]
-    assert sampling_params.guided_decoding is not None
+    assert sampling_params.structured_outputs is not None

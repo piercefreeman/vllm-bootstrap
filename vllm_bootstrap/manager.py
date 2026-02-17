@@ -225,12 +225,17 @@ class VLLMEnvironmentManager:
 
                 import vllm
 
-                llm = vllm.LLM(
-                    model=record.model,
-                    tensor_parallel_size=len(record.gpu_ids),
-                    task=record.task,
-                    **extra_kwargs,
-                )
+                # vLLM >= 0.15 uses runner/convert instead of task
+                vllm_kwargs: dict[str, Any] = {
+                    "model": record.model,
+                    "tensor_parallel_size": len(record.gpu_ids),
+                }
+                if record.task == "embed":
+                    vllm_kwargs["runner"] = "pooling"
+                    vllm_kwargs["convert"] = "embed"
+
+                vllm_kwargs.update(extra_kwargs)
+                llm = vllm.LLM(**vllm_kwargs)
 
             with self._lock:
                 if record.state == LaunchState.BOOTSTRAPPING:

@@ -87,8 +87,8 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             context.set_details("prompts must not be empty")
             return inference_pb2.CompleteResponse()
 
-        from vllm import GuidedDecodingParams as VLLMGuidedDecodingParams
         from vllm import SamplingParams
+        from vllm.sampling_params import StructuredOutputsParams
 
         kwargs: dict = {}
         if request.max_tokens > 0:
@@ -112,7 +112,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 elif oneof_field == "grammar":
                     gd_kwargs["grammar"] = gd.grammar
             if gd_kwargs:
-                kwargs["guided_decoding"] = VLLMGuidedDecodingParams(**gd_kwargs)
+                kwargs["structured_outputs"] = StructuredOutputsParams(**gd_kwargs)
 
         sampling_params = SamplingParams(**kwargs)
 

@@ -238,7 +238,9 @@ def test_launch_with_embed_task(
     )
 
     mock_llm = _make_mock_llm()
-    _install_fake_vllm(monkeypatch, llm_side_effect=lambda *a, **kw: mock_llm)
+    mock_llm_class = _install_fake_vllm(
+        monkeypatch, llm_side_effect=lambda *a, **kw: mock_llm
+    )
 
     launch = manager.launch(
         model="BAAI/bge-base-en-v1.5",
@@ -252,6 +254,43 @@ def test_launch_with_embed_task(
     llm, task = manager.get_llm(launch.launch_id)
     assert task == "embed"
     assert llm is mock_llm
+
+    # Verify vLLM 0.15 API: embed task passes runner="pooling" and convert="embed"
+    call_kwargs = mock_llm_class.call_args[1]
+    assert call_kwargs["runner"] == "pooling"
+    assert call_kwargs["convert"] == "embed"
+    assert "task" not in call_kwargs
+
+
+def test_launch_generate_does_not_pass_runner_or_convert(
+    monkeypatch: pytest.MonkeyPatch, manager: VLLMEnvironmentManager
+) -> None:
+    """Verify that generate task does not set runner/convert kwargs."""
+    nvidia_smi_fixture = _load_fixture("nvidia_smi_query_gpu_index.txt")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(
+        subprocess, "check_output", lambda *_a, **_kw: nvidia_smi_fixture
+    )
+
+    mock_llm = _make_mock_llm()
+    mock_llm_class = _install_fake_vllm(
+        monkeypatch, llm_side_effect=lambda *a, **kw: mock_llm
+    )
+
+    launch = manager.launch(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        gpu_ids=[0],
+        task="generate",
+    )
+
+    _wait_until(lambda: manager.get_status(launch.launch_id).state == LaunchState.READY)
+
+    call_kwargs = mock_llm_class.call_args[1]
+    assert call_kwargs["model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert call_kwargs["tensor_parallel_size"] == 1
+    assert "task" not in call_kwargs
+    assert "runner" not in call_kwargs
+    assert "convert" not in call_kwargs
 
 
 def test_get_llm_raises_for_not_ready(
