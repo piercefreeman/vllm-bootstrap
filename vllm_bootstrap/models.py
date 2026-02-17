@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -26,15 +27,14 @@ class LaunchRequest(BaseModel):
         default=None,
         description="Specific GPU ids to allocate. Defaults to all visible GPUs.",
     )
-    port: int | None = Field(
-        default=None,
-        ge=1,
-        le=65535,
-        description="Optional API port for the launched vLLM process.",
+    task: str = Field(
+        default="generate",
+        pattern=r"^(embed|generate)$",
+        description="Task type: 'generate' for text generation or 'embed' for embeddings.",
     )
-    extra_args: list[str] = Field(
-        default_factory=list,
-        description="Additional CLI flags appended to vllm.entrypoints.openai.api_server.",
+    extra_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional keyword arguments passed to vllm.LLM constructor.",
     )
 
 
@@ -42,11 +42,10 @@ class LaunchResponse(BaseModel):
     launch_id: str
     model: str
     gpu_ids: list[int]
-    port: int
+    task: str
     state: LaunchState
     created_at: datetime
     updated_at: datetime
-    return_code: int | None = None
     error: str | None = None
 
     @classmethod
@@ -55,11 +54,10 @@ class LaunchResponse(BaseModel):
             launch_id=snapshot.launch_id,
             model=snapshot.model,
             gpu_ids=snapshot.gpu_ids,
-            port=snapshot.port,
+            task=snapshot.task,
             state=snapshot.state,
             created_at=_as_datetime(snapshot.created_at),
             updated_at=_as_datetime(snapshot.updated_at),
-            return_code=snapshot.return_code,
             error=snapshot.error,
         )
 

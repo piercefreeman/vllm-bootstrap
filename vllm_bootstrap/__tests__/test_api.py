@@ -56,11 +56,10 @@ def _snapshot(
         launch_id=launch_id,
         model=model,
         gpu_ids=[0, 1],
-        port=8001,
+        task="generate",
         state=state,
         created_at=now,
         updated_at=now,
-        return_code=None,
         error=None,
     )
 
@@ -155,7 +154,7 @@ def test_list_launches_returns_active_launches_with_metadata(monkeypatch) -> Non
     assert payload[0]["launch_id"] == "ready-1"
     assert payload[0]["model"] == "model-ready"
     assert payload[0]["gpu_ids"] == [0, 1]
-    assert payload[0]["port"] == 8001
+    assert payload[0]["task"] == "generate"
     assert payload[0]["state"] == "ready"
     assert "created_at" in payload[0]
     assert "updated_at" in payload[0]
@@ -190,109 +189,6 @@ def test_access_key_accepts_bearer_and_basic_auth(monkeypatch) -> None:
     assert bearer_response.status_code == 200
     assert basic_response.status_code == 200
     assert invalid_response.status_code == 401
-
-
-class _MockUpstreamResponse:
-    def __init__(
-        self,
-        *,
-        status_code: int = 200,
-        content: bytes = b"{}",
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.content = content
-        self.headers = headers or {"content-type": "application/json"}
-
-
-class _MockAsyncClient:
-    last_request: dict | None = None
-    response: _MockUpstreamResponse = _MockUpstreamResponse()
-    error: Exception | None = None
-
-    def __init__(self, *_, **__) -> None:
-        return
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
-        return None
-
-    async def request(self, **kwargs):
-        _MockAsyncClient.last_request = kwargs
-        if _MockAsyncClient.error is not None:
-            raise _MockAsyncClient.error
-        return _MockAsyncClient.response
-
-
-def test_proxy_to_vllm_forwards_request(monkeypatch) -> None:
-    snapshot = _snapshot(launch_id="ready-1", state=LaunchState.READY)
-    monkeypatch.setattr(api_module, "manager", _StubManager([snapshot]))
-    monkeypatch.setattr(api_module.settings, "access_key", None)
-    monkeypatch.setattr(api_module.settings, "launch_host", "0.0.0.0")
-    monkeypatch.setattr(api_module.httpx, "AsyncClient", _MockAsyncClient)
-    _MockAsyncClient.error = None
-    _MockAsyncClient.response = _MockUpstreamResponse(
-        status_code=201,
-        content=b'{"ok":true}',
-        headers={"content-type": "application/json", "x-upstream": "yes"},
-    )
-
-    with TestClient(api_module.app) as client:
-        response = client.post(
-            "/proxy/ready-1/v1/chat/completions?stream=false",
-            json={"model": "test-model"},
-            headers={"x-custom-header": "abc"},
-        )
-
-    assert response.status_code == 201
-    assert response.json() == {"ok": True}
-    assert response.headers["x-upstream"] == "yes"
-    assert _MockAsyncClient.last_request is not None
-    assert (
-        _MockAsyncClient.last_request["url"]
-        == "http://127.0.0.1:8001/v1/chat/completions?stream=false"
-    )
-    assert _MockAsyncClient.last_request["method"] == "POST"
-    assert b'"model":"test-model"' in _MockAsyncClient.last_request["content"]
-    assert _MockAsyncClient.last_request["headers"]["x-custom-header"] == "abc"
-
-
-def test_proxy_to_vllm_requires_ready_launch(monkeypatch) -> None:
-    snapshot = _snapshot(launch_id="boot-1", state=LaunchState.BOOTSTRAPPING)
-    monkeypatch.setattr(api_module, "manager", _StubManager([snapshot]))
-    monkeypatch.setattr(api_module.settings, "access_key", None)
-
-    with TestClient(api_module.app) as client:
-        response = client.get("/proxy/boot-1/v1/models")
-
-    assert response.status_code == 409
-    assert "not ready" in response.json()["detail"]
-
-
-def test_proxy_to_vllm_propagates_unknown_launch(monkeypatch) -> None:
-    monkeypatch.setattr(api_module, "manager", _StubManager([]))
-    monkeypatch.setattr(api_module.settings, "access_key", None)
-
-    with TestClient(api_module.app) as client:
-        response = client.get("/proxy/missing-launch/v1/models")
-
-    assert response.status_code == 404
-
-
-def test_proxy_to_vllm_returns_bad_gateway_for_upstream_error(monkeypatch) -> None:
-    snapshot = _snapshot(launch_id="ready-2", state=LaunchState.READY)
-    monkeypatch.setattr(api_module, "manager", _StubManager([snapshot]))
-    monkeypatch.setattr(api_module.settings, "access_key", None)
-    monkeypatch.setattr(api_module.httpx, "AsyncClient", _MockAsyncClient)
-    _MockAsyncClient.error = api_module.httpx.ConnectError("connection refused")
-
-    with TestClient(api_module.app) as client:
-        response = client.get("/proxy/ready-2/v1/models")
-
-    assert response.status_code == 502
-    assert "Failed to reach launch ready-2 upstream server" in response.json()["detail"]
 
 
 def test_stats_returns_host_and_gpu_metrics(monkeypatch) -> None:

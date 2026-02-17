@@ -105,3 +105,36 @@ jobs:
           build-args: |
             VLLM_BASE_IMAGE=${{ matrix.base_image }}
           tags: ${{ steps.tags.outputs.tags }}
+
+  publish-client:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [validation, tests]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Set version from tag
+        run: ./scripts/bump-version.sh "${{ github.ref_name }}"
+
+      - name: Generate protobuf files
+        run: make generate-proto
+        env:
+          UV_PYTHON: "3.12"
+
+      - name: Build client package
+        run: uv build --directory vllm-bootstrap-client
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: vllm-bootstrap-client/dist/

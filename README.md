@@ -75,8 +75,10 @@ docker build \
 Run:
 
 ```bash
-docker run --rm -p 8000:8000 vllm-bootstrap:cuda12.4-local
+docker run --rm -p 8000:8000 -p 8001:8001 vllm-bootstrap:cuda12.4-local
 ```
+
+Port 8000 serves the bootstrap control plane API, and port 8001 is the gRPC service.
 
 ## Key environment variables
 
