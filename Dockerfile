@@ -2,6 +2,7 @@ ARG BASE_IMAGE=nvidia/cuda:12.1.0-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ENV PYTHONUNBUFFERED=1
+ENV UV_PYTHON=3.12
 
 # Install uv for fast dependency resolution and Python management.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
