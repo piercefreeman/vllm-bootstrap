@@ -10,7 +10,8 @@ WORKDIR /app
 COPY pyproject.toml README.md main.py ./
 COPY vllm_bootstrap ./vllm_bootstrap
 
-RUN uv pip install --system ".[vllm]" --constraint <(pip freeze | grep "^torch==")
+RUN pip freeze | grep "^torch==" > /tmp/torch-constraint.txt && \
+    uv pip install --system ".[vllm]" --constraint /tmp/torch-constraint.txt
 
 EXPOSE 8000 8001
 
