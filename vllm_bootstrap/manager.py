@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import csv
-import gc
 import logging
+import multiprocessing
 import os
 import re
 import subprocess
@@ -12,7 +12,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Sequence
+from multiprocessing.connection import Connection
+from typing import Any, Callable, Sequence
 
 from .config import Settings
 
@@ -90,10 +91,14 @@ class _LaunchRecord:
     state: LaunchState
     created_at: float
     updated_at: float
-    llm: Any | None  # vllm.LLM when loaded
     log_lines: list[str] = field(default_factory=list)
     error: str | None = None
-    _load_thread: threading.Thread | None = None
+    _process: multiprocessing.Process | None = None
+    _cmd_conn: Connection | None = None
+    _log_queue: multiprocessing.Queue | None = None
+    _pipe_lock: threading.Lock | None = None
+    _log_thread: threading.Thread | None = None
+    _monitor_thread: threading.Thread | None = None
 
 
 class LaunchManagerError(Exception):
@@ -132,32 +137,33 @@ _NVIDIA_SMI_GPU_QUERY_COMMAND = [
 _NA_TOKENS = {"", "N/A", "[N/A]", "Not Supported", "[Not Supported]"}
 
 
-class _RecordLogHandler(logging.Handler):
-    """Captures vllm log output into a record's log_lines list."""
+def _worker_entry(
+    cmd_conn: Connection,
+    log_queue: multiprocessing.Queue,
+    gpu_ids: list[int],
+    model: str,
+    task: str,
+    extra_kwargs: dict[str, Any],
+) -> None:
+    """Default subprocess entry point. Lazily imports worker_main."""
+    from .worker import worker_main
 
-    def __init__(self, record: _LaunchRecord) -> None:
-        super().__init__()
-        self._record = record
-
-    def emit(self, log_record: logging.LogRecord) -> None:
-        line = self.format(log_record)
-        self._record.log_lines.append(line)
-        # Also mirror to stdout
-        try:
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-        except (BrokenPipeError, OSError, ValueError):
-            pass
+    worker_main(cmd_conn, log_queue, gpu_ids, model, task, extra_kwargs)
 
 
 class VLLMEnvironmentManager:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        _worker_fn: Callable[..., None] | None = None,
+    ) -> None:
         self._settings = settings
         self._settings.log_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._construction_lock = threading.Lock()
         self._launches: dict[str, _LaunchRecord] = {}
         self._gpu_owners: dict[int, str] = {}
+        self._worker_fn = _worker_fn or _worker_entry
 
     def launch(
         self,
@@ -189,82 +195,177 @@ class VLLMEnvironmentManager:
                 state=LaunchState.BOOTSTRAPPING,
                 created_at=created_at,
                 updated_at=created_at,
-                llm=None,
             )
+            record._pipe_lock = threading.Lock()
             self._launches[launch_id] = record
             for gpu_id in selected_gpu_ids:
                 self._gpu_owners[gpu_id] = launch_id
 
-            load_thread = threading.Thread(
-                target=self._load_model_thread,
+            monitor_thread = threading.Thread(
+                target=self._launch_subprocess,
                 args=(record, extra_kwargs or {}),
                 daemon=True,
-                name=f"vllm-loader-{launch_id}",
+                name=f"vllm-monitor-{launch_id}",
             )
-            record._load_thread = load_thread
-            load_thread.start()
+            record._monitor_thread = monitor_thread
+            monitor_thread.start()
 
             return self._snapshot(record)
 
-    def _load_model_thread(
+    def _launch_subprocess(
         self, record: _LaunchRecord, extra_kwargs: dict[str, Any]
     ) -> None:
-        log_handler = _RecordLogHandler(record)
-        log_handler.setFormatter(
-            logging.Formatter("%(levelname)s %(name)s: %(message)s")
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        log_queue: multiprocessing.Queue = ctx.Queue()
+
+        record._cmd_conn = parent_conn
+        record._log_queue = log_queue
+
+        process = ctx.Process(
+            target=self._worker_fn,
+            args=(
+                child_conn,
+                log_queue,
+                record.gpu_ids,
+                record.model,
+                record.task,
+                extra_kwargs,
+            ),
+            daemon=True,
         )
-        vllm_logger = logging.getLogger("vllm")
-        vllm_logger.addHandler(log_handler)
-        if vllm_logger.level == logging.NOTSET or vllm_logger.level > logging.DEBUG:
-            vllm_logger.setLevel(logging.DEBUG)
+        record._process = process
+        process.start()
+        child_conn.close()
+
+        # Start log drainer
+        log_thread = threading.Thread(
+            target=self._drain_logs,
+            args=(record,),
+            daemon=True,
+            name=f"vllm-logdrain-{record.launch_id}",
+        )
+        record._log_thread = log_thread
+        log_thread.start()
+
+        # Wait for ready/error from subprocess
         try:
-            with self._construction_lock:
-                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                    str(gpu_id) for gpu_id in record.gpu_ids
-                )
-
-                import vllm
-
-                # vLLM >= 0.15 uses runner/convert instead of task
-                vllm_kwargs: dict[str, Any] = {
-                    "model": record.model,
-                    "tensor_parallel_size": len(record.gpu_ids),
-                }
-                if record.task == "embed":
-                    vllm_kwargs["runner"] = "pooling"
-                    vllm_kwargs["convert"] = "embed"
-
-                vllm_kwargs.update(extra_kwargs)
-                llm = vllm.LLM(**vllm_kwargs)
-
+            msg = parent_conn.recv()
+        except (EOFError, OSError):
             with self._lock:
-                if record.state == LaunchState.BOOTSTRAPPING:
-                    record.llm = llm
-                    record.state = LaunchState.READY
-                    record.updated_at = time.time()
-        except Exception as exc:
-            with self._lock:
-                record.error = str(exc)
+                record.error = "Subprocess exited before signaling ready"
                 record.state = LaunchState.FAILED
                 record.updated_at = time.time()
                 self._release_gpus(record)
-        finally:
-            vllm_logger.removeHandler(log_handler)
+            return
+
+        if msg[0] == "ready":
+            with self._lock:
+                if record.state == LaunchState.BOOTSTRAPPING:
+                    record.state = LaunchState.READY
+                    record.updated_at = time.time()
+        elif msg[0] == "error":
+            with self._lock:
+                record.error = msg[1]
+                record.state = LaunchState.FAILED
+                record.updated_at = time.time()
+                self._release_gpus(record)
+
+    def _drain_logs(self, record: _LaunchRecord) -> None:
+        log_queue = record._log_queue
+        if log_queue is None:
+            return
+        while True:
+            try:
+                line = log_queue.get(timeout=0.5)
+            except Exception:
+                # Check if process is still alive
+                proc = record._process
+                if proc is not None and not proc.is_alive():
+                    # Drain remaining items
+                    while True:
+                        try:
+                            line = log_queue.get_nowait()
+                            record.log_lines.append(line)
+                            try:
+                                sys.stdout.write(line + "\n")
+                                sys.stdout.flush()
+                            except (BrokenPipeError, OSError, ValueError):
+                                pass
+                        except Exception:
+                            break
+                    break
+                continue
+            record.log_lines.append(line)
+            try:
+                sys.stdout.write(line + "\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+    def generate(
+        self, launch_id: str, prompts: list[str], params_dict: dict[str, Any]
+    ) -> list[dict]:
+        with self._lock:
+            record = self._require_record(launch_id)
+            if record.state != LaunchState.READY:
+                raise LaunchConflictError(
+                    f"Launch {launch_id} is not ready (state={record.state.value})"
+                )
+            if record.task != "generate":
+                raise LaunchConflictError(
+                    f"Launch {launch_id} has task '{record.task}', expected 'generate'"
+                )
+
+        return self._send_command(record, ("generate", prompts, params_dict))
+
+    def embed(self, launch_id: str, texts: list[str]) -> list[list[float]]:
+        with self._lock:
+            record = self._require_record(launch_id)
+            if record.state != LaunchState.READY:
+                raise LaunchConflictError(
+                    f"Launch {launch_id} is not ready (state={record.state.value})"
+                )
+            if record.task != "embed":
+                raise LaunchConflictError(
+                    f"Launch {launch_id} has task '{record.task}', expected 'embed'"
+                )
+
+        return self._send_command(record, ("embed", texts))
+
+    def _send_command(self, record: _LaunchRecord, message: tuple) -> Any:
+        pipe_lock = record._pipe_lock
+        cmd_conn = record._cmd_conn
+        if pipe_lock is None or cmd_conn is None:
+            raise LaunchConflictError(
+                f"Launch {record.launch_id} subprocess is not available"
+            )
+
+        with pipe_lock:
+            try:
+                cmd_conn.send(message)
+                response = cmd_conn.recv()
+            except (EOFError, BrokenPipeError, OSError) as exc:
+                with self._lock:
+                    record.error = f"Subprocess crashed: {exc}"
+                    record.state = LaunchState.FAILED
+                    record.updated_at = time.time()
+                    self._release_gpus(record)
+                raise LaunchConflictError(
+                    f"Launch {record.launch_id} subprocess crashed"
+                ) from exc
+
+        if response[0] == "result":
+            return response[1]
+        elif response[0] == "error":
+            raise RuntimeError(f"Subprocess error: {response[1]}")
+        else:
+            raise RuntimeError(f"Unexpected subprocess response: {response}")
 
     def get_status(self, launch_id: str) -> LaunchSnapshot:
         with self._lock:
             record = self._require_record(launch_id)
             return self._snapshot(record)
-
-    def get_llm(self, launch_id: str) -> tuple[Any, str]:
-        """Get the LLM instance and task for a launch. Used by gRPC servicer."""
-        with self._lock:
-            record = self._require_record(launch_id)
-            if record.state != LaunchState.READY or record.llm is None:
-                raise LaunchConflictError(
-                    f"Launch {launch_id} is not ready (state={record.state.value})"
-                )
-            return record.llm, record.task
 
     def list_launches(self, *, include_terminal: bool = False) -> list[LaunchSnapshot]:
         with self._lock:
@@ -313,8 +414,7 @@ class VLLMEnvironmentManager:
             record.state = LaunchState.STOPPING
             record.updated_at = time.time()
 
-        # Clean up the LLM instance
-        self._cleanup_llm(record)
+        self._cleanup_subprocess(record)
 
         with self._lock:
             record = self._require_record(launch_id)
@@ -324,17 +424,37 @@ class VLLMEnvironmentManager:
                 self._release_gpus(record)
             return self._snapshot(record)
 
-    def _cleanup_llm(self, record: _LaunchRecord) -> None:
-        llm = record.llm
-        record.llm = None
-        del llm
-        gc.collect()
-        try:
-            import torch.cuda
+    def _cleanup_subprocess(self, record: _LaunchRecord) -> None:
+        cmd_conn = record._cmd_conn
+        process = record._process
+        timeout = self._settings.stop_timeout_seconds
 
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
+        # Send shutdown command
+        if cmd_conn is not None:
+            try:
+                cmd_conn.send(("shutdown",))
+            except (EOFError, BrokenPipeError, OSError):
+                pass
+
+        # Wait for process to exit
+        if process is not None and process.is_alive():
+            process.join(timeout=timeout)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+
+        # Close pipe
+        if cmd_conn is not None:
+            try:
+                cmd_conn.close()
+            except OSError:
+                pass
+            record._cmd_conn = None
+
+        record._process = None
 
     def stop_all(self) -> None:
         with self._lock:
