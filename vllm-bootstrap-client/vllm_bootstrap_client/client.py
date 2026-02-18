@@ -178,6 +178,56 @@ class VLLMManager:
 
     # -- gRPC inference endpoints --
 
+    async def embed_stream(
+        self, launch_id: str, texts: list[str]
+    ) -> AsyncIterator[list[float]]:
+        request = inference_pb2.EmbedRequest(launch_id=launch_id, texts=texts)
+        async for embedding in self._stub.EmbedStream(
+            request, metadata=self._grpc_metadata()
+        ):
+            yield list(embedding.values)
+
+    async def complete_stream(
+        self,
+        launch_id: str,
+        prompts: list[str],
+        max_tokens: int,
+        *,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        json_schema: str | None = None,
+        regex: str | None = None,
+        grammar: str | None = None,
+        choice: list[str] | None = None,
+    ) -> AsyncIterator[inference_pb2.Completion]:
+        kwargs: dict[str, Any] = {
+            "launch_id": launch_id,
+            "prompts": prompts,
+            "max_tokens": max_tokens,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+
+        gd_kwargs: dict[str, Any] = {}
+        if json_schema is not None:
+            gd_kwargs["json_schema"] = json_schema
+        if regex is not None:
+            gd_kwargs["regex"] = regex
+        if grammar is not None:
+            gd_kwargs["grammar"] = grammar
+        if choice is not None:
+            gd_kwargs["choice"] = choice
+        if gd_kwargs:
+            kwargs["guided_decoding"] = inference_pb2.GuidedDecodingParams(**gd_kwargs)
+
+        async for completion in self._stub.CompleteStream(
+            inference_pb2.CompleteRequest(**kwargs),
+            metadata=self._grpc_metadata(),
+        ):
+            yield completion
+
     async def embed(self, launch_id: str, texts: list[str]) -> list[list[float]]:
         response = await self._stub.Embed(
             inference_pb2.EmbedRequest(launch_id=launch_id, texts=texts),

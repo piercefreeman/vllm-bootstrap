@@ -88,6 +88,10 @@ def worker_main(
             _handle_generate(llm, cmd_conn, msg)
         elif cmd == "embed":
             _handle_embed(llm, cmd_conn, msg)
+        elif cmd == "generate_stream":
+            _handle_generate_stream(llm, cmd_conn, msg)
+        elif cmd == "embed_stream":
+            _handle_embed_stream(llm, cmd_conn, msg)
         else:
             cmd_conn.send(("error", f"Unknown command: {cmd}"))
 
@@ -131,5 +135,52 @@ def _handle_embed(llm: Any, cmd_conn: Connection, msg: tuple) -> None:
         outputs = llm.embed(texts)
         results = [list(output.outputs.embedding) for output in outputs]
         cmd_conn.send(("result", results))
+    except Exception:
+        cmd_conn.send(("error", traceback.format_exc()))
+
+
+def _handle_generate_stream(llm: Any, cmd_conn: Connection, msg: tuple) -> None:
+    try:
+        _, prompts, params_dict = msg
+
+        from vllm import SamplingParams
+        from vllm.sampling_params import StructuredOutputsParams
+
+        kwargs: dict[str, Any] = {}
+        for key in ("max_tokens", "temperature", "top_p"):
+            if key in params_dict:
+                kwargs[key] = params_dict[key]
+
+        structured = params_dict.get("structured_outputs")
+        if structured is not None:
+            kwargs["structured_outputs"] = StructuredOutputsParams(**structured)
+
+        sampling_params = SamplingParams(**kwargs)
+
+        for prompt in prompts:
+            outputs = llm.generate([prompt], sampling_params)
+            output = outputs[0]
+            result = {
+                "text": output.outputs[0].text,
+                "prompt_tokens": len(output.prompt_token_ids),
+                "completion_tokens": len(output.outputs[0].token_ids),
+            }
+            cmd_conn.send(("stream_item", result))
+
+        cmd_conn.send(("stream_end",))
+    except Exception:
+        cmd_conn.send(("error", traceback.format_exc()))
+
+
+def _handle_embed_stream(llm: Any, cmd_conn: Connection, msg: tuple) -> None:
+    try:
+        _, texts = msg
+
+        for text in texts:
+            outputs = llm.embed([text])
+            result = list(outputs[0].outputs.embedding)
+            cmd_conn.send(("stream_item", result))
+
+        cmd_conn.send(("stream_end",))
     except Exception:
         cmd_conn.send(("error", traceback.format_exc()))

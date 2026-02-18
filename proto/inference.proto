@@ -4,6 +4,8 @@ package vllm_bootstrap;
 service InferenceService {
   rpc Embed(EmbedRequest) returns (EmbedResponse);
   rpc Complete(CompleteRequest) returns (CompleteResponse);
+  rpc EmbedStream(EmbedRequest) returns (stream Embedding);
+  rpc CompleteStream(CompleteRequest) returns (stream Completion);
 }
 
 message EmbedRequest {

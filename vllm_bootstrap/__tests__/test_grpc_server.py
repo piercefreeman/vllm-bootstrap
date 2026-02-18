@@ -323,6 +323,119 @@ def test_complete_with_choice(grpc_channel) -> None:
         assert params_dict["structured_outputs"]["choice"] == ["yes", "no"]
 
 
+# -- Streaming tests --
+
+
+def test_embed_stream_returns_vectors(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    _inject_ready_launch(manager, "embed-1", "embed")
+
+    def fake_embed_stream(launch_id, texts):
+        yield [0.1, 0.2, 0.3]
+        yield [0.4, 0.5, 0.6]
+
+    with patch.object(manager, "embed_stream", side_effect=fake_embed_stream):
+        results = list(
+            stub.EmbedStream(
+                inference_pb2.EmbedRequest(
+                    launch_id="embed-1", texts=["hello", "world"]
+                )
+            )
+        )
+        assert len(results) == 2
+        assert list(results[0].values) == pytest.approx([0.1, 0.2, 0.3])
+        assert list(results[1].values) == pytest.approx([0.4, 0.5, 0.6])
+
+
+def test_complete_stream_returns_items(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    _inject_ready_launch(manager, "gen-1", "generate")
+
+    def fake_generate_stream(launch_id, prompts, params_dict):
+        yield {"text": "Hello!", "prompt_tokens": 2, "completion_tokens": 2}
+        yield {"text": "Goodbye!", "prompt_tokens": 3, "completion_tokens": 1}
+
+    with patch.object(manager, "generate_stream", side_effect=fake_generate_stream):
+        results = list(
+            stub.CompleteStream(
+                inference_pb2.CompleteRequest(
+                    launch_id="gen-1",
+                    prompts=["Say hello", "Say goodbye"],
+                    max_tokens=100,
+                )
+            )
+        )
+        assert len(results) == 2
+        assert results[0].text == "Hello!"
+        assert results[0].prompt_tokens == 2
+        assert results[0].completion_tokens == 2
+        assert results[1].text == "Goodbye!"
+        assert results[1].prompt_tokens == 3
+        assert results[1].completion_tokens == 1
+
+
+def test_embed_stream_empty_rejects(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    _inject_ready_launch(manager, "embed-1", "embed")
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        list(
+            stub.EmbedStream(inference_pb2.EmbedRequest(launch_id="embed-1", texts=[]))
+        )
+    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert "texts must not be empty" in exc_info.value.details()
+
+
+def test_complete_stream_empty_rejects(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    _inject_ready_launch(manager, "gen-1", "generate")
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        list(
+            stub.CompleteStream(
+                inference_pb2.CompleteRequest(
+                    launch_id="gen-1",
+                    prompts=[],
+                    max_tokens=100,
+                )
+            )
+        )
+    assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert "prompts must not be empty" in exc_info.value.details()
+
+
+def test_complete_stream_error_handling(grpc_channel) -> None:
+    channel, manager = grpc_channel
+    stub = inference_pb2_grpc.InferenceServiceStub(channel)
+
+    _inject_ready_launch(manager, "gen-1", "generate")
+
+    with patch.object(
+        manager,
+        "generate_stream",
+        side_effect=RuntimeError("Subprocess error: boom"),
+    ):
+        with pytest.raises(grpc.RpcError) as exc_info:
+            list(
+                stub.CompleteStream(
+                    inference_pb2.CompleteRequest(
+                        launch_id="gen-1",
+                        prompts=["hello"],
+                        max_tokens=10,
+                    )
+                )
+            )
+        assert exc_info.value.code() == grpc.StatusCode.INTERNAL
+
+
 # -- Auth interceptor tests --
 
 TEST_ACCESS_KEY = "test-secret-key-12345"

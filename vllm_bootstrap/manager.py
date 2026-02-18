@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing.connection import Connection
+from collections.abc import Generator
 from typing import Any, Callable, Sequence
 
 from .config import Settings
@@ -332,6 +333,75 @@ class VLLMEnvironmentManager:
                 )
 
         return self._send_command(record, ("embed", texts))
+
+    def generate_stream(
+        self, launch_id: str, prompts: list[str], params_dict: dict[str, Any]
+    ) -> Generator[dict, None, None]:
+        with self._lock:
+            record = self._require_record(launch_id)
+            if record.state != LaunchState.READY:
+                raise LaunchConflictError(
+                    f"Launch {launch_id} is not ready (state={record.state.value})"
+                )
+            if record.task != "generate":
+                raise LaunchConflictError(
+                    f"Launch {launch_id} has task '{record.task}', expected 'generate'"
+                )
+
+        yield from self._send_command_stream(
+            record, ("generate_stream", prompts, params_dict)
+        )
+
+    def embed_stream(
+        self, launch_id: str, texts: list[str]
+    ) -> Generator[list[float], None, None]:
+        with self._lock:
+            record = self._require_record(launch_id)
+            if record.state != LaunchState.READY:
+                raise LaunchConflictError(
+                    f"Launch {launch_id} is not ready (state={record.state.value})"
+                )
+            if record.task != "embed":
+                raise LaunchConflictError(
+                    f"Launch {launch_id} has task '{record.task}', expected 'embed'"
+                )
+
+        yield from self._send_command_stream(record, ("embed_stream", texts))
+
+    def _send_command_stream(
+        self, record: _LaunchRecord, message: tuple
+    ) -> Generator[Any, None, None]:
+        pipe_lock = record._pipe_lock
+        cmd_conn = record._cmd_conn
+        if pipe_lock is None or cmd_conn is None:
+            raise LaunchConflictError(
+                f"Launch {record.launch_id} subprocess is not available"
+            )
+
+        with pipe_lock:
+            try:
+                cmd_conn.send(message)
+                while True:
+                    response = cmd_conn.recv()
+                    if response[0] == "stream_item":
+                        yield response[1]
+                    elif response[0] == "stream_end":
+                        break
+                    elif response[0] == "error":
+                        raise RuntimeError(f"Subprocess error: {response[1]}")
+                    else:
+                        raise RuntimeError(
+                            f"Unexpected subprocess response: {response}"
+                        )
+            except (EOFError, BrokenPipeError, OSError) as exc:
+                with self._lock:
+                    record.error = f"Subprocess crashed: {exc}"
+                    record.state = LaunchState.FAILED
+                    record.updated_at = time.time()
+                    self._release_gpus(record)
+                raise LaunchConflictError(
+                    f"Launch {record.launch_id} subprocess crashed"
+                ) from exc
 
     def _send_command(self, record: _LaunchRecord, message: tuple) -> Any:
         pipe_lock = record._pipe_lock
