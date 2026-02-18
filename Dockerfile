@@ -1,9 +1,9 @@
-ARG BASE_IMAGE=pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
+ARG BASE_IMAGE=nvidia/cuda:12.1.0-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ENV PYTHONUNBUFFERED=1
 
-# Install uv for fast dependency resolution.
+# Install uv for fast dependency resolution and Python management.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
@@ -11,10 +11,11 @@ WORKDIR /app
 COPY pyproject.toml README.md main.py ./
 COPY vllm_bootstrap ./vllm_bootstrap
 
-RUN pip freeze | grep "^torch==" > /tmp/torch-constraint.txt && \
-    uv pip install --system ".[vllm]" --constraint /tmp/torch-constraint.txt
+# vllm often reinstalls torch and pulls in additional dependencies beyond
+# what the base image provides, so this step can be slow and large.
+RUN uv sync --extra vllm
 
 EXPOSE 8000 8001
 
 ENTRYPOINT []
-CMD ["python3", "-m", "vllm_bootstrap"]
+CMD ["uv", "run", "python3", "-m", "vllm_bootstrap"]
