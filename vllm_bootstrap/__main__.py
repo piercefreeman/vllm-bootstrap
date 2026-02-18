@@ -19,6 +19,7 @@ def main() -> None:
         manager,
         settings.grpc_port,
         access_key_getter=lambda: settings.access_key,
+        limit_message_size=settings.grpc_limit_message_size,
     )
     grpc_server.start()
     logger.info("gRPC server started on port %d", settings.grpc_port)
