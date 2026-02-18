@@ -183,6 +183,7 @@ def create_grpc_server(
     port: int,
     *,
     access_key_getter: AccessKeyGetter | None = None,
+    limit_message_size: bool = False,
 ) -> grpc.Server:
     interceptors = []
     if access_key_getter is not None:
@@ -190,9 +191,17 @@ def create_grpc_server(
             build_access_key_interceptor(access_key_getter=access_key_getter)
         )
 
+    options: list[tuple[str, int]] = []
+    if not limit_message_size:
+        options = [
+            ("grpc.max_send_message_length", -1),
+            ("grpc.max_receive_message_length", -1),
+        ]
+
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=10),
         interceptors=interceptors,
+        options=options or None,
     )
     servicer = InferenceServicer(manager)
     inference_pb2_grpc.add_InferenceServiceServicer_to_server(servicer, server)

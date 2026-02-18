@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     stop_timeout_seconds: float = 30.0
     log_read_chunk_bytes: int = 1024 * 1024
     grpc_port: int = 8001
+    grpc_limit_message_size: bool = False
     access_key: str | None = None
 
     @field_validator("access_key", mode="before")
