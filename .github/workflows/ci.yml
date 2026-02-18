@@ -80,9 +80,9 @@ jobs:
       matrix:
         include:
           - cuda_tag: cuda12.1
-            base_image: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
+            base_image: nvidia/cuda:12.1.0-runtime-ubuntu22.04
           - cuda_tag: cuda12.4
-            base_image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+            base_image: nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
     steps:
       - name: Free up disk space
