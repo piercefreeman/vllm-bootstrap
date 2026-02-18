@@ -15,11 +15,13 @@ to the container). For a device with 12.4:
 docker pull ghcr.io/piercefreeman/vllm-bootstrap:cuda12.4-latest
 ```
 
+Images are based on the [official PyTorch Docker images](https://hub.docker.com/r/pytorch/pytorch) and use the latest available PyTorch release for each CUDA version. Because PyTorch eventually stops publishing new images for older CUDA releases, newer CUDA versions will receive more recent PyTorch (and by extension vllm) versions.
+
 If you want to build locally:
 
 ```bash
 docker build \
-  --build-arg VLLM_BASE_IMAGE=vllm/vllm-openai:v0.8.5.post1 \
+  --build-arg BASE_IMAGE=pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime \
   -t vllm-bootstrap:cuda12.4-local .
 ```
 
