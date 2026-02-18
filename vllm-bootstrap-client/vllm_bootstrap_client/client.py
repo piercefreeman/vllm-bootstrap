@@ -31,6 +31,7 @@ class VLLMManager:
         grpc_address: str | None = None,
         access_key: str | None = None,
         timeout: float = 30.0,
+        limit_response: bool = False,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._access_key = access_key
@@ -48,7 +49,16 @@ class VLLMManager:
             headers=self._auth_headers(),
             timeout=timeout,
         )
-        self._channel = grpc.aio.insecure_channel(self._grpc_address)
+        grpc_options: list[tuple[str, int]] = []
+        if not limit_response:
+            grpc_options = [
+                ("grpc.max_send_message_length", -1),
+                ("grpc.max_receive_message_length", -1),
+            ]
+        self._channel = grpc.aio.insecure_channel(
+            self._grpc_address,
+            options=grpc_options or None,
+        )
         self._stub = inference_pb2_grpc.InferenceServiceStub(self._channel)
 
     def _auth_headers(self) -> dict[str, str]:
