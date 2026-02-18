@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from . import inference_pb2 as inference__pb2  # noqa: E402
+from . import inference_pb2 as inference__pb2
 
 GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
@@ -44,6 +44,16 @@ class InferenceServiceStub(object):
                 request_serializer=inference__pb2.CompleteRequest.SerializeToString,
                 response_deserializer=inference__pb2.CompleteResponse.FromString,
                 _registered_method=True)
+        self.EmbedStream = channel.unary_stream(
+                '/vllm_bootstrap.InferenceService/EmbedStream',
+                request_serializer=inference__pb2.EmbedRequest.SerializeToString,
+                response_deserializer=inference__pb2.Embedding.FromString,
+                _registered_method=True)
+        self.CompleteStream = channel.unary_stream(
+                '/vllm_bootstrap.InferenceService/CompleteStream',
+                request_serializer=inference__pb2.CompleteRequest.SerializeToString,
+                response_deserializer=inference__pb2.Completion.FromString,
+                _registered_method=True)
 
 
 class InferenceServiceServicer(object):
@@ -61,6 +71,18 @@ class InferenceServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def EmbedStream(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CompleteStream(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_InferenceServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -73,6 +95,16 @@ def add_InferenceServiceServicer_to_server(servicer, server):
                     servicer.Complete,
                     request_deserializer=inference__pb2.CompleteRequest.FromString,
                     response_serializer=inference__pb2.CompleteResponse.SerializeToString,
+            ),
+            'EmbedStream': grpc.unary_stream_rpc_method_handler(
+                    servicer.EmbedStream,
+                    request_deserializer=inference__pb2.EmbedRequest.FromString,
+                    response_serializer=inference__pb2.Embedding.SerializeToString,
+            ),
+            'CompleteStream': grpc.unary_stream_rpc_method_handler(
+                    servicer.CompleteStream,
+                    request_deserializer=inference__pb2.CompleteRequest.FromString,
+                    response_serializer=inference__pb2.Completion.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -129,6 +161,60 @@ class InferenceService(object):
             '/vllm_bootstrap.InferenceService/Complete',
             inference__pb2.CompleteRequest.SerializeToString,
             inference__pb2.CompleteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def EmbedStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/vllm_bootstrap.InferenceService/EmbedStream',
+            inference__pb2.EmbedRequest.SerializeToString,
+            inference__pb2.Embedding.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CompleteStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/vllm_bootstrap.InferenceService/CompleteStream',
+            inference__pb2.CompleteRequest.SerializeToString,
+            inference__pb2.Completion.FromString,
             options,
             channel_credentials,
             insecure,
