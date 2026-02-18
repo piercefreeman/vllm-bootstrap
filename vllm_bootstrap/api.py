@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import logging
@@ -23,6 +24,7 @@ from .models import LaunchRequest, LaunchResponse, LogsResponse, SystemStatsResp
 
 settings = load_settings()
 manager = VLLMEnvironmentManager(settings=settings)
+atexit.register(manager.stop_all)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 logger = logging.getLogger(__name__)
 

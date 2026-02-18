@@ -232,7 +232,7 @@ class VLLMEnvironmentManager:
                 record.task,
                 extra_kwargs,
             ),
-            daemon=True,
+            daemon=False,
         )
         record._process = process
         process.start()
