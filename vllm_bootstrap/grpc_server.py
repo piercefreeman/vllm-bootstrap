@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from concurrent import futures
+from typing import Any
 
 import grpc
 
@@ -23,24 +24,6 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     def Embed(
         self, request: inference_pb2.EmbedRequest, context: grpc.ServicerContext
     ) -> inference_pb2.EmbedResponse:
-        try:
-            llm, task = self._manager.get_llm(request.launch_id)
-        except LaunchNotFoundError as exc:
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(str(exc))
-            return inference_pb2.EmbedResponse()
-        except LaunchConflictError as exc:
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(str(exc))
-            return inference_pb2.EmbedResponse()
-
-        if task != "embed":
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(
-                f"Launch {request.launch_id} has task '{task}', expected 'embed'"
-            )
-            return inference_pb2.EmbedResponse()
-
         texts = list(request.texts)
         if not texts:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -48,15 +31,22 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             return inference_pb2.EmbedResponse()
 
         try:
-            outputs = llm.embed(texts)
+            results = self._manager.embed(request.launch_id, texts)
+        except LaunchNotFoundError as exc:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(exc))
+            return inference_pb2.EmbedResponse()
+        except LaunchConflictError as exc:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return inference_pb2.EmbedResponse()
         except Exception as exc:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Embedding failed: {exc}")
             return inference_pb2.EmbedResponse()
 
         embeddings = []
-        for output in outputs:
-            data = output.outputs.embedding
+        for data in results:
             embeddings.append(inference_pb2.Embedding(values=data))
 
         return inference_pb2.EmbedResponse(embeddings=embeddings)
@@ -64,44 +54,23 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
     def Complete(
         self, request: inference_pb2.CompleteRequest, context: grpc.ServicerContext
     ) -> inference_pb2.CompleteResponse:
-        try:
-            llm, task = self._manager.get_llm(request.launch_id)
-        except LaunchNotFoundError as exc:
-            context.set_code(grpc.StatusCode.NOT_FOUND)
-            context.set_details(str(exc))
-            return inference_pb2.CompleteResponse()
-        except LaunchConflictError as exc:
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(str(exc))
-            return inference_pb2.CompleteResponse()
-
-        if task != "generate":
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(
-                f"Launch {request.launch_id} has task '{task}', expected 'generate'"
-            )
-            return inference_pb2.CompleteResponse()
-
         prompts = list(request.prompts)
         if not prompts:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("prompts must not be empty")
             return inference_pb2.CompleteResponse()
 
-        from vllm import SamplingParams
-        from vllm.sampling_params import StructuredOutputsParams
-
-        kwargs: dict = {}
+        params_dict: dict[str, Any] = {}
         if request.max_tokens > 0:
-            kwargs["max_tokens"] = request.max_tokens
+            params_dict["max_tokens"] = request.max_tokens
         if request.HasField("temperature"):
-            kwargs["temperature"] = request.temperature
+            params_dict["temperature"] = request.temperature
         if request.HasField("top_p"):
-            kwargs["top_p"] = request.top_p
+            params_dict["top_p"] = request.top_p
 
         if request.HasField("guided_decoding"):
             gd = request.guided_decoding
-            gd_kwargs: dict = {}
+            gd_kwargs: dict[str, Any] = {}
             if gd.choice:
                 gd_kwargs["choice"] = list(gd.choice)
             else:
@@ -113,24 +82,30 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
                 elif oneof_field == "grammar":
                     gd_kwargs["grammar"] = gd.grammar
             if gd_kwargs:
-                kwargs["structured_outputs"] = StructuredOutputsParams(**gd_kwargs)
-
-        sampling_params = SamplingParams(**kwargs)
+                params_dict["structured_outputs"] = gd_kwargs
 
         try:
-            outputs = llm.generate(prompts, sampling_params)
+            results = self._manager.generate(request.launch_id, prompts, params_dict)
+        except LaunchNotFoundError as exc:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(exc))
+            return inference_pb2.CompleteResponse()
+        except LaunchConflictError as exc:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return inference_pb2.CompleteResponse()
         except Exception as exc:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Generation failed: {exc}")
             return inference_pb2.CompleteResponse()
 
         completions = []
-        for output in outputs:
+        for result in results:
             completions.append(
                 inference_pb2.Completion(
-                    text=output.outputs[0].text,
-                    prompt_tokens=len(output.prompt_token_ids),
-                    completion_tokens=len(output.outputs[0].token_ids),
+                    text=result["text"],
+                    prompt_tokens=result["prompt_tokens"],
+                    completion_tokens=result["completion_tokens"],
                 )
             )
 

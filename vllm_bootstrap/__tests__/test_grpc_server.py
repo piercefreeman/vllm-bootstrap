@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import sys
 import time
-import types
 from concurrent import futures
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import grpc
 import pytest
@@ -14,6 +12,8 @@ from vllm_bootstrap.config import Settings
 from vllm_bootstrap.generated import inference_pb2, inference_pb2_grpc
 from vllm_bootstrap.grpc_server import InferenceServicer
 from vllm_bootstrap.manager import (
+    LaunchConflictError,
+    LaunchNotFoundError,
     LaunchState,
     VLLMEnvironmentManager,
     _LaunchRecord,
@@ -34,7 +34,6 @@ def _inject_ready_launch(
     manager: VLLMEnvironmentManager,
     launch_id: str,
     task: str,
-    llm: MagicMock,
 ) -> None:
     """Directly inject a ready launch record into the manager for testing."""
     now = time.time()
@@ -46,36 +45,9 @@ def _inject_ready_launch(
         state=LaunchState.READY,
         created_at=now,
         updated_at=now,
-        llm=llm,
     )
     manager._launches[launch_id] = record
     manager._gpu_owners[0] = launch_id
-
-
-@pytest.fixture(autouse=True)
-def _fake_vllm():
-    """Install a fake vllm module so gRPC servicer can import from vllm."""
-    fake_vllm = types.ModuleType("vllm")
-    fake_vllm.SamplingParams = lambda **kwargs: MagicMock(**kwargs)
-    fake_vllm.LLM = MagicMock()
-
-    fake_sampling_params = types.ModuleType("vllm.sampling_params")
-    fake_sampling_params.StructuredOutputsParams = lambda **kwargs: MagicMock(**kwargs)
-    fake_vllm.sampling_params = fake_sampling_params
-
-    old_vllm = sys.modules.get("vllm")
-    old_sp = sys.modules.get("vllm.sampling_params")
-    sys.modules["vllm"] = fake_vllm
-    sys.modules["vllm.sampling_params"] = fake_sampling_params
-    yield
-    if old_vllm is None:
-        sys.modules.pop("vllm", None)
-    else:
-        sys.modules["vllm"] = old_vllm
-    if old_sp is None:
-        sys.modules.pop("vllm.sampling_params", None)
-    else:
-        sys.modules["vllm.sampling_params"] = old_sp
 
 
 @pytest.fixture
@@ -98,35 +70,37 @@ def test_embed_returns_vectors(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_output_1 = MagicMock()
-    mock_output_1.outputs.embedding = [0.1, 0.2, 0.3]
-    mock_output_2 = MagicMock()
-    mock_output_2.outputs.embedding = [0.4, 0.5, 0.6]
-    mock_llm.embed.return_value = [mock_output_1, mock_output_2]
+    _inject_ready_launch(manager, "embed-1", "embed")
 
-    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
-
-    response = stub.Embed(
-        inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello", "world"])
-    )
-    assert len(response.embeddings) == 2
-    assert list(response.embeddings[0].values) == pytest.approx([0.1, 0.2, 0.3])
-    assert list(response.embeddings[1].values) == pytest.approx([0.4, 0.5, 0.6])
-    mock_llm.embed.assert_called_once_with(["hello", "world"])
+    with patch.object(
+        manager, "embed", return_value=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    ) as mock_embed:
+        response = stub.Embed(
+            inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello", "world"])
+        )
+        assert len(response.embeddings) == 2
+        assert list(response.embeddings[0].values) == pytest.approx([0.1, 0.2, 0.3])
+        assert list(response.embeddings[1].values) == pytest.approx([0.4, 0.5, 0.6])
+        mock_embed.assert_called_once_with("embed-1", ["hello", "world"])
 
 
 def test_embed_rejects_generate_task(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
+    _inject_ready_launch(manager, "gen-1", "generate")
 
-    with pytest.raises(grpc.RpcError) as exc_info:
-        stub.Embed(inference_pb2.EmbedRequest(launch_id="gen-1", texts=["hello"]))
-    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
-    assert "expected 'embed'" in exc_info.value.details()
+    with patch.object(
+        manager,
+        "embed",
+        side_effect=LaunchConflictError(
+            "Launch gen-1 has task 'generate', expected 'embed'"
+        ),
+    ):
+        with pytest.raises(grpc.RpcError) as exc_info:
+            stub.Embed(inference_pb2.EmbedRequest(launch_id="gen-1", texts=["hello"]))
+        assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+        assert "expected 'embed'" in exc_info.value.details()
 
 
 def test_embed_returns_not_found(grpc_channel) -> None:
@@ -138,77 +112,71 @@ def test_embed_returns_not_found(grpc_channel) -> None:
     assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND
 
 
-def _make_mock_completion(text: str, prompt_token_ids: list, token_ids: list):
-    """Helper to create a mock vLLM completion output."""
-    mock = MagicMock()
-    mock.outputs[0].text = text
-    mock.prompt_token_ids = prompt_token_ids
-    mock.outputs[0].token_ids = token_ids
-    return mock
-
-
 def test_complete_returns_text(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_llm.generate.return_value = [
-        _make_mock_completion("Hello world!", [1, 2, 3], [4, 5]),
-    ]
+    _inject_ready_launch(manager, "gen-1", "generate")
 
-    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
-
-    response = stub.Complete(
-        inference_pb2.CompleteRequest(
-            launch_id="gen-1",
-            prompts=["Say hello"],
-            max_tokens=100,
+    with patch.object(
+        manager,
+        "generate",
+        return_value=[
+            {"text": "Hello world!", "prompt_tokens": 3, "completion_tokens": 2}
+        ],
+    ) as mock_generate:
+        response = stub.Complete(
+            inference_pb2.CompleteRequest(
+                launch_id="gen-1",
+                prompts=["Say hello"],
+                max_tokens=100,
+            )
         )
-    )
-    assert len(response.completions) == 1
-    assert response.completions[0].text == "Hello world!"
-    assert response.completions[0].prompt_tokens == 3
-    assert response.completions[0].completion_tokens == 2
+        assert len(response.completions) == 1
+        assert response.completions[0].text == "Hello world!"
+        assert response.completions[0].prompt_tokens == 3
+        assert response.completions[0].completion_tokens == 2
 
 
 def test_complete_batch(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_llm.generate.return_value = [
-        _make_mock_completion("Hello!", [1, 2], [3, 4]),
-        _make_mock_completion("Goodbye!", [5, 6, 7], [8]),
-    ]
+    _inject_ready_launch(manager, "gen-1", "generate")
 
-    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
-
-    response = stub.Complete(
-        inference_pb2.CompleteRequest(
-            launch_id="gen-1",
-            prompts=["Say hello", "Say goodbye"],
-            max_tokens=100,
+    with patch.object(
+        manager,
+        "generate",
+        return_value=[
+            {"text": "Hello!", "prompt_tokens": 2, "completion_tokens": 2},
+            {"text": "Goodbye!", "prompt_tokens": 3, "completion_tokens": 1},
+        ],
+    ) as mock_generate:
+        response = stub.Complete(
+            inference_pb2.CompleteRequest(
+                launch_id="gen-1",
+                prompts=["Say hello", "Say goodbye"],
+                max_tokens=100,
+            )
         )
-    )
-    assert len(response.completions) == 2
-    assert response.completions[0].text == "Hello!"
-    assert response.completions[0].prompt_tokens == 2
-    assert response.completions[0].completion_tokens == 2
-    assert response.completions[1].text == "Goodbye!"
-    assert response.completions[1].prompt_tokens == 3
-    assert response.completions[1].completion_tokens == 1
+        assert len(response.completions) == 2
+        assert response.completions[0].text == "Hello!"
+        assert response.completions[0].prompt_tokens == 2
+        assert response.completions[0].completion_tokens == 2
+        assert response.completions[1].text == "Goodbye!"
+        assert response.completions[1].prompt_tokens == 3
+        assert response.completions[1].completion_tokens == 1
 
-    mock_llm.generate.assert_called_once()
-    call_args = mock_llm.generate.call_args
-    assert call_args[0][0] == ["Say hello", "Say goodbye"]
+        mock_generate.assert_called_once()
+        call_args = mock_generate.call_args
+        assert call_args[0][1] == ["Say hello", "Say goodbye"]
 
 
 def test_complete_rejects_empty_prompts(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
+    _inject_ready_launch(manager, "gen-1", "generate")
 
     with pytest.raises(grpc.RpcError) as exc_info:
         stub.Complete(
@@ -226,19 +194,25 @@ def test_complete_rejects_embed_task(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+    _inject_ready_launch(manager, "embed-1", "embed")
 
-    with pytest.raises(grpc.RpcError) as exc_info:
-        stub.Complete(
-            inference_pb2.CompleteRequest(
-                launch_id="embed-1",
-                prompts=["Say hello"],
-                max_tokens=100,
+    with patch.object(
+        manager,
+        "generate",
+        side_effect=LaunchConflictError(
+            "Launch embed-1 has task 'embed', expected 'generate'"
+        ),
+    ):
+        with pytest.raises(grpc.RpcError) as exc_info:
+            stub.Complete(
+                inference_pb2.CompleteRequest(
+                    launch_id="embed-1",
+                    prompts=["Say hello"],
+                    max_tokens=100,
+                )
             )
-        )
-    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
-    assert "expected 'generate'" in exc_info.value.details()
+        assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+        assert "expected 'generate'" in exc_info.value.details()
 
 
 def test_complete_returns_not_found(grpc_channel) -> None:
@@ -260,88 +234,93 @@ def test_complete_with_json_schema(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_llm.generate.return_value = [
-        _make_mock_completion('{"name": "Alice"}', [1, 2], [3, 4, 5]),
-    ]
+    _inject_ready_launch(manager, "gen-1", "generate")
 
-    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
-
-    schema = '{"type": "object", "properties": {"name": {"type": "string"}}}'
-    response = stub.Complete(
-        inference_pb2.CompleteRequest(
-            launch_id="gen-1",
-            prompts=["Generate a person"],
-            max_tokens=100,
-            guided_decoding=inference_pb2.GuidedDecodingParams(
-                json_schema=schema,
-            ),
+    with patch.object(
+        manager,
+        "generate",
+        return_value=[
+            {"text": '{"name": "Alice"}', "prompt_tokens": 2, "completion_tokens": 3}
+        ],
+    ) as mock_generate:
+        schema = '{"type": "object", "properties": {"name": {"type": "string"}}}'
+        response = stub.Complete(
+            inference_pb2.CompleteRequest(
+                launch_id="gen-1",
+                prompts=["Generate a person"],
+                max_tokens=100,
+                guided_decoding=inference_pb2.GuidedDecodingParams(
+                    json_schema=schema,
+                ),
+            )
         )
-    )
-    assert len(response.completions) == 1
-    assert response.completions[0].text == '{"name": "Alice"}'
+        assert len(response.completions) == 1
+        assert response.completions[0].text == '{"name": "Alice"}'
 
-    call_args = mock_llm.generate.call_args
-    sampling_params = call_args[0][1]
-    assert sampling_params.structured_outputs is not None
+        call_args = mock_generate.call_args
+        params_dict = call_args[0][2]
+        assert "structured_outputs" in params_dict
+        assert params_dict["structured_outputs"]["json"] == schema
 
 
 def test_complete_with_regex(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_llm.generate.return_value = [
-        _make_mock_completion("42", [1], [2, 3]),
-    ]
+    _inject_ready_launch(manager, "gen-1", "generate")
 
-    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
-
-    response = stub.Complete(
-        inference_pb2.CompleteRequest(
-            launch_id="gen-1",
-            prompts=["Give me a number"],
-            max_tokens=10,
-            guided_decoding=inference_pb2.GuidedDecodingParams(
-                regex=r"\d+",
-            ),
+    with patch.object(
+        manager,
+        "generate",
+        return_value=[{"text": "42", "prompt_tokens": 1, "completion_tokens": 2}],
+    ) as mock_generate:
+        response = stub.Complete(
+            inference_pb2.CompleteRequest(
+                launch_id="gen-1",
+                prompts=["Give me a number"],
+                max_tokens=10,
+                guided_decoding=inference_pb2.GuidedDecodingParams(
+                    regex=r"\d+",
+                ),
+            )
         )
-    )
-    assert len(response.completions) == 1
-    assert response.completions[0].text == "42"
+        assert len(response.completions) == 1
+        assert response.completions[0].text == "42"
 
-    call_args = mock_llm.generate.call_args
-    sampling_params = call_args[0][1]
-    assert sampling_params.structured_outputs is not None
+        call_args = mock_generate.call_args
+        params_dict = call_args[0][2]
+        assert "structured_outputs" in params_dict
+        assert params_dict["structured_outputs"]["regex"] == r"\d+"
 
 
 def test_complete_with_choice(grpc_channel) -> None:
     channel, manager = grpc_channel
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_llm.generate.return_value = [
-        _make_mock_completion("yes", [1, 2], [3]),
-    ]
+    _inject_ready_launch(manager, "gen-1", "generate")
 
-    _inject_ready_launch(manager, "gen-1", "generate", mock_llm)
-
-    response = stub.Complete(
-        inference_pb2.CompleteRequest(
-            launch_id="gen-1",
-            prompts=["Is this good?"],
-            max_tokens=10,
-            guided_decoding=inference_pb2.GuidedDecodingParams(
-                choice=["yes", "no"],
-            ),
+    with patch.object(
+        manager,
+        "generate",
+        return_value=[{"text": "yes", "prompt_tokens": 2, "completion_tokens": 1}],
+    ) as mock_generate:
+        response = stub.Complete(
+            inference_pb2.CompleteRequest(
+                launch_id="gen-1",
+                prompts=["Is this good?"],
+                max_tokens=10,
+                guided_decoding=inference_pb2.GuidedDecodingParams(
+                    choice=["yes", "no"],
+                ),
+            )
         )
-    )
-    assert len(response.completions) == 1
-    assert response.completions[0].text == "yes"
+        assert len(response.completions) == 1
+        assert response.completions[0].text == "yes"
 
-    call_args = mock_llm.generate.call_args
-    sampling_params = call_args[0][1]
-    assert sampling_params.structured_outputs is not None
+        call_args = mock_generate.call_args
+        params_dict = call_args[0][2]
+        assert "structured_outputs" in params_dict
+        assert params_dict["structured_outputs"]["choice"] == ["yes", "no"]
 
 
 # -- Auth interceptor tests --
@@ -375,9 +354,7 @@ def test_auth_rejects_missing_metadata(grpc_channel_with_auth) -> None:
     channel, manager = grpc_channel_with_auth
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_llm.embed.return_value = []
-    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+    _inject_ready_launch(manager, "embed-1", "embed")
 
     with pytest.raises(grpc.RpcError) as exc_info:
         stub.Embed(inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]))
@@ -388,9 +365,7 @@ def test_auth_rejects_wrong_key(grpc_channel_with_auth) -> None:
     channel, manager = grpc_channel_with_auth
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_llm.embed.return_value = []
-    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+    _inject_ready_launch(manager, "embed-1", "embed")
 
     with pytest.raises(grpc.RpcError) as exc_info:
         stub.Embed(
@@ -404,18 +379,15 @@ def test_auth_accepts_valid_bearer_token(grpc_channel_with_auth) -> None:
     channel, manager = grpc_channel_with_auth
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_output = MagicMock()
-    mock_output.outputs.embedding = [0.1, 0.2]
-    mock_llm.embed.return_value = [mock_output]
-    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+    _inject_ready_launch(manager, "embed-1", "embed")
 
-    response = stub.Embed(
-        inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
-        metadata=[("authorization", f"Bearer {TEST_ACCESS_KEY}")],
-    )
-    assert len(response.embeddings) == 1
-    assert list(response.embeddings[0].values) == pytest.approx([0.1, 0.2])
+    with patch.object(manager, "embed", return_value=[[0.1, 0.2]]):
+        response = stub.Embed(
+            inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
+            metadata=[("authorization", f"Bearer {TEST_ACCESS_KEY}")],
+        )
+        assert len(response.embeddings) == 1
+        assert list(response.embeddings[0].values) == pytest.approx([0.1, 0.2])
 
 
 def test_auth_accepts_valid_basic_auth(grpc_channel_with_auth) -> None:
@@ -424,19 +396,17 @@ def test_auth_accepts_valid_basic_auth(grpc_channel_with_auth) -> None:
     channel, manager = grpc_channel_with_auth
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_output = MagicMock()
-    mock_output.outputs.embedding = [0.3, 0.4]
-    mock_llm.embed.return_value = [mock_output]
-    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+    _inject_ready_launch(manager, "embed-1", "embed")
 
     basic_cred = base64.b64encode(f"user:{TEST_ACCESS_KEY}".encode()).decode()
-    response = stub.Embed(
-        inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
-        metadata=[("authorization", f"Basic {basic_cred}")],
-    )
-    assert len(response.embeddings) == 1
-    assert list(response.embeddings[0].values) == pytest.approx([0.3, 0.4])
+
+    with patch.object(manager, "embed", return_value=[[0.3, 0.4]]):
+        response = stub.Embed(
+            inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
+            metadata=[("authorization", f"Basic {basic_cred}")],
+        )
+        assert len(response.embeddings) == 1
+        assert list(response.embeddings[0].values) == pytest.approx([0.3, 0.4])
 
 
 @pytest.fixture
@@ -465,15 +435,12 @@ def test_auth_passes_when_no_key_configured(grpc_channel_no_auth) -> None:
     channel, manager = grpc_channel_no_auth
     stub = inference_pb2_grpc.InferenceServiceStub(channel)
 
-    mock_llm = MagicMock()
-    mock_output = MagicMock()
-    mock_output.outputs.embedding = [0.5, 0.6]
-    mock_llm.embed.return_value = [mock_output]
-    _inject_ready_launch(manager, "embed-1", "embed", mock_llm)
+    _inject_ready_launch(manager, "embed-1", "embed")
 
-    # No metadata at all — should pass through since no key is configured
-    response = stub.Embed(
-        inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
-    )
-    assert len(response.embeddings) == 1
-    assert list(response.embeddings[0].values) == pytest.approx([0.5, 0.6])
+    with patch.object(manager, "embed", return_value=[[0.5, 0.6]]):
+        # No metadata at all — should pass through since no key is configured
+        response = stub.Embed(
+            inference_pb2.EmbedRequest(launch_id="embed-1", texts=["hello"]),
+        )
+        assert len(response.embeddings) == 1
+        assert list(response.embeddings[0].values) == pytest.approx([0.5, 0.6])
