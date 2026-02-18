@@ -80,9 +80,9 @@ jobs:
       matrix:
         include:
           - cuda_tag: cuda12.1
-            base_image: nvidia/cuda:12.1.0-runtime-ubuntu22.04
+            base_image: nvidia/cuda:12.1.0-devel-ubuntu22.04
           - cuda_tag: cuda12.4
-            base_image: nvidia/cuda:12.4.0-runtime-ubuntu22.04
+            base_image: nvidia/cuda:12.4.0-devel-ubuntu22.04
 
     steps:
       - name: Free up disk space
