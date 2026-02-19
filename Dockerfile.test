@@ -1,0 +1,39 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies: gcc-12/g++-12 for vLLM CPU, libtcmalloc for performance
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc-12 \
+    g++-12 \
+    libgoogle-perftools-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Install Python 3.12 via uv
+RUN uv python install 3.12
+
+WORKDIR /app
+
+# Install vLLM CPU wheel first (slowest layer, changes least)
+RUN uv venv && \
+    uv pip install "https://github.com/vllm-project/vllm/releases/download/v0.15.1/vllm-0.15.1+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
+
+# Install project dependencies (changes occasionally)
+COPY pyproject.toml uv.lock ./
+RUN uv sync --extra dev --no-install-project
+
+# Copy source code (changes most frequently)
+COPY . .
+RUN uv pip install --no-deps -e .
+
+# CPU-mode vLLM: use env var parsing for GPU discovery, target CPU device
+ENV CUDA_VISIBLE_DEVICES=0
+ENV VLLM_TARGET_DEVICE=cpu
+
+CMD ["uv", "run", "pytest", "-x", "-q", "vllm_bootstrap/__tests__/"]

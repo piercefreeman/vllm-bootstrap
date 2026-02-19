@@ -1,4 +1,4 @@
-.PHONY: lint lint-verify test test-vllm-compat validate generate-proto generate-client
+.PHONY: lint lint-verify test test-vllm-compat validate generate-proto generate-client build-test-image test-integration
 
 lint:
 	uv run --no-project --with ruff ruff check . --fix
@@ -51,3 +51,11 @@ generate-client-models:
 		--target-python-version 3.11
 
 generate-client: generate-proto generate-client-models
+
+build-test-image:
+	docker build -f Dockerfile.test -t vllm-bootstrap-test .
+
+test-integration: build-test-image
+	docker run --rm \
+		-v $(HOME)/.cache/huggingface:/root/.cache/huggingface \
+		vllm-bootstrap-test
