@@ -7,7 +7,6 @@ Connection (pipe). Log lines are forwarded to the parent via a Queue.
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
 import traceback
@@ -16,19 +15,44 @@ from multiprocessing import Queue
 from typing import Any
 
 
-class _QueueLogHandler(logging.Handler):
-    """Sends formatted log lines to the parent process via a Queue."""
+class _QueueStream:
+    """File-like wrapper that sends complete lines to a multiprocessing Queue.
 
-    def __init__(self, log_queue: Queue) -> None:
-        super().__init__()
+    Replaces sys.stdout/sys.stderr in the worker subprocess so that all output
+    (logging, print, tqdm, etc.) is forwarded to the parent process.
+    """
+
+    def __init__(self, log_queue: Queue, original: Any) -> None:
         self._queue = log_queue
+        self._original = original
+        self._buffer = ""
 
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            line = self.format(record)
-            self._queue.put_nowait(line)
-        except Exception:
-            pass
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line:
+                try:
+                    self._queue.put_nowait(line)
+                except Exception:
+                    pass
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            try:
+                self._queue.put_nowait(self._buffer)
+            except Exception:
+                pass
+            self._buffer = ""
+
+    def fileno(self) -> int:
+        return self._original.fileno()
+
+    def isatty(self) -> bool:
+        return False
 
 
 def worker_main(
@@ -49,12 +73,12 @@ def worker_main(
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
 
-    log_handler = _QueueLogHandler(log_queue)
-    log_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
-    vllm_logger = logging.getLogger("vllm")
-    vllm_logger.addHandler(log_handler)
-    if vllm_logger.level == logging.NOTSET or vllm_logger.level > logging.DEBUG:
-        vllm_logger.setLevel(logging.DEBUG)
+    # Redirect stdout/stderr so all output (logging, print, tqdm, etc.)
+    # is forwarded to the parent process via the log queue. vLLM's child
+    # loggers set propagate=False and write to stdout via their own
+    # StreamHandlers, so a handler on the "vllm" logger alone won't work.
+    sys.stdout = _QueueStream(log_queue, sys.stdout)  # type: ignore[assignment]
+    sys.stderr = _QueueStream(log_queue, sys.stderr)  # type: ignore[assignment]
 
     try:
         import vllm
@@ -157,9 +181,8 @@ def _handle_generate_stream(llm: Any, cmd_conn: Connection, msg: tuple) -> None:
 
         sampling_params = SamplingParams(**kwargs)
 
-        for prompt in prompts:
-            outputs = llm.generate([prompt], sampling_params)
-            output = outputs[0]
+        outputs = llm.generate(prompts, sampling_params)
+        for output in outputs:
             result = {
                 "text": output.outputs[0].text,
                 "prompt_tokens": len(output.prompt_token_ids),
@@ -176,9 +199,9 @@ def _handle_embed_stream(llm: Any, cmd_conn: Connection, msg: tuple) -> None:
     try:
         _, texts = msg
 
-        for text in texts:
-            outputs = llm.embed([text])
-            result = list(outputs[0].outputs.embedding)
+        outputs = llm.embed(texts)
+        for output in outputs:
+            result = list(output.outputs.embedding)
             cmd_conn.send(("stream_item", result))
 
         cmd_conn.send(("stream_end",))
