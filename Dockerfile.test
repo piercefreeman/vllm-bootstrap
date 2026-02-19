@@ -21,8 +21,10 @@ RUN uv python install 3.12
 WORKDIR /app
 
 # Install vLLM CPU wheel first (slowest layer, changes least)
+# --torch-backend cpu tells uv to resolve torch deps from PyTorch's CPU index
 RUN uv venv && \
-    uv pip install "https://github.com/vllm-project/vllm/releases/download/v0.15.1/vllm-0.15.1+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
+    uv pip install --torch-backend cpu \
+    "https://github.com/vllm-project/vllm/releases/download/v0.15.1/vllm-0.15.1+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
 
 # Install project dependencies (changes occasionally)
 COPY pyproject.toml uv.lock ./
