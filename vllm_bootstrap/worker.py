@@ -157,9 +157,8 @@ def _handle_generate_stream(llm: Any, cmd_conn: Connection, msg: tuple) -> None:
 
         sampling_params = SamplingParams(**kwargs)
 
-        for prompt in prompts:
-            outputs = llm.generate([prompt], sampling_params)
-            output = outputs[0]
+        outputs = llm.generate(prompts, sampling_params)
+        for output in outputs:
             result = {
                 "text": output.outputs[0].text,
                 "prompt_tokens": len(output.prompt_token_ids),
@@ -176,9 +175,9 @@ def _handle_embed_stream(llm: Any, cmd_conn: Connection, msg: tuple) -> None:
     try:
         _, texts = msg
 
-        for text in texts:
-            outputs = llm.embed([text])
-            result = list(outputs[0].outputs.embedding)
+        outputs = llm.embed(texts)
+        for output in outputs:
+            result = list(output.outputs.embedding)
             cmd_conn.send(("stream_item", result))
 
         cmd_conn.send(("stream_end",))
